@@ -151,6 +151,7 @@ class Pipeline:
                                         "base_symbol": s.base_symbol,
                                         "ts_utc": s.ts_utc,
                                         "oi_usd": s.oi_usd,
+                                        "oi_qty": s.oi_qty,
                                         "last_price": s.last_price,
                                         "mark_price": s.mark_price,
                                         "funding_rate": s.funding_rate,

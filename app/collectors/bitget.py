@@ -85,12 +85,13 @@ class BitgetCollector:
             mark = float(t.get("markPrice") or 0) or None
             funding = float(t.get("fundingRate") or 0)
             vol = float(t.get("quoteVolume") or t.get("usdtVolume") or 0) or None
-            oi_usd = float(t.get("holdingAmount") or 0) or None
-            # holdingAmount may be contracts — prefer openInterestUsd if present
-            if t.get("openInterestUsd"):
-                oi_usd = float(t["openInterestUsd"])
-            elif oi_usd and (mark or last):
-                oi_usd = oi_usd * (mark or last) * detect_multiplier(contract_symbol, self.norm)
+            px = mark or last or 0
+            mult = detect_multiplier(contract_symbol, self.norm)
+            holding = float(t.get("holdingAmount") or 0) or None
+            oi_qty = holding * mult if holding else None
+            oi_usd = float(t.get("openInterestUsd") or 0) or None
+            if oi_usd is None and oi_qty and px:
+                oi_usd = oi_qty * px
             long_pct = short_pct = None
             try:
                 ls = await self._get(
@@ -112,6 +113,7 @@ class BitgetCollector:
                 multiplier=detect_multiplier(contract_symbol, self.norm),
                 ts_utc=now_utc(),
                 oi_usd=oi_usd,
+                oi_qty=oi_qty,
                 last_price=last,
                 mark_price=mark,
                 funding_rate=funding,

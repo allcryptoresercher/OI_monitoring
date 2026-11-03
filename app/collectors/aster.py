@@ -102,10 +102,11 @@ class AsterCollector:
             mark = float((premium or {}).get("markPrice") or 0) or None
             funding = float((premium or {}).get("lastFundingRate") or 0)
             vol = float(ticker.get("quoteVolume") or 0) or None
-            oi_qty = float((oi or {}).get("openInterest") or 0)
+            oi_contracts = float((oi or {}).get("openInterest") or 0)
             px = mark or last or 0
             mult = detect_multiplier(contract_symbol, self.norm)
-            oi_usd = oi_qty * px * mult if px else None
+            oi_qty = oi_contracts * mult if oi_contracts else None
+            oi_usd = oi_qty * px if oi_qty and px else None
             return MarketSnapshot(
                 exchange=self.name,
                 contract_symbol=contract_symbol,
@@ -114,6 +115,7 @@ class AsterCollector:
                 multiplier=mult,
                 ts_utc=now_utc(),
                 oi_usd=oi_usd,
+                oi_qty=oi_qty,
                 last_price=last,
                 mark_price=mark,
                 funding_rate=funding,

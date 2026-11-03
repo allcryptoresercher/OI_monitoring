@@ -72,9 +72,10 @@ class HyperliquidCollector:
             mark = float(ctx.get("markPx") or 0) or None
             mid = float(ctx.get("midPx") or 0) or None
             funding = float(ctx.get("funding") or 0)
-            oi = float(ctx.get("openInterest") or 0)
+            oi_qty = float(ctx.get("openInterest") or 0) or None
             # OI on HL often in coins
-            oi_usd = oi * (mark or mid or 0) if (mark or mid) else None
+            px = mark or mid or 0
+            oi_usd = oi_qty * px if oi_qty and px else None
             day_ntl = float(ctx.get("dayNtlVlm") or 0) or None
             return MarketSnapshot(
                 exchange=self.name,
@@ -84,6 +85,7 @@ class HyperliquidCollector:
                 multiplier=1.0,
                 ts_utc=now_utc(),
                 oi_usd=oi_usd,
+                oi_qty=oi_qty,
                 last_price=mid or mark,
                 mark_price=mark,
                 funding_rate=funding,

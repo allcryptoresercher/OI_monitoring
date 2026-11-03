@@ -82,12 +82,12 @@ class BybitCollector:
             mark = float(t.get("markPrice") or 0) or None
             funding = float(t.get("fundingRate") or 0)
             vol = float(t.get("turnover24h") or 0) or None
+            px = mark or last or 0
+            mult = detect_multiplier(contract_symbol, self.norm)
+            oi_qty = float(t.get("openInterest") or 0) * mult or None
             oi_raw = float(t.get("openInterestValue") or 0) or None
-            if oi_raw is None:
-                oi_qty = float(t.get("openInterest") or 0)
-                px = mark or last or 0
-                mult = detect_multiplier(contract_symbol, self.norm)
-                oi_raw = oi_qty * px * mult if px else None
+            if oi_raw is None and oi_qty and px:
+                oi_raw = oi_qty * px
             long_pct = short_pct = None
             try:
                 ratio = await self._get(
@@ -109,6 +109,7 @@ class BybitCollector:
                 multiplier=detect_multiplier(contract_symbol, self.norm),
                 ts_utc=now_utc(),
                 oi_usd=oi_raw,
+                oi_qty=oi_qty,
                 last_price=last,
                 mark_price=mark,
                 funding_rate=funding,

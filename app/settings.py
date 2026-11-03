@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     )
     config_path: str = Field(default="./config.yaml", alias="CONFIG_PATH")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    pushover_token: str = Field(default="", alias="PUSHOVER_TOKEN")
+    pushover_user: str = Field(default="", alias="PUSHOVER_USER")
 
     @property
     def admin_id_set(self) -> set[int]:

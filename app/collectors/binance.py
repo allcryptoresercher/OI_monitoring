@@ -71,7 +71,8 @@ class BinanceCollector:
         oi_contracts = float(oi.get("openInterest") or 0)
         px = mark or last or 0
         mult = detect_multiplier(contract_symbol, self.norm)
-        oi_usd = oi_contracts * px * mult if px else None
+        oi_qty = oi_contracts * mult if oi_contracts else None
+        oi_usd = oi_qty * px if oi_qty and px else None
         long_pct = short_pct = None
         if lsr:
             try:
@@ -87,6 +88,7 @@ class BinanceCollector:
             multiplier=mult,
             ts_utc=now_utc(),
             oi_usd=oi_usd,
+            oi_qty=oi_qty,
             last_price=last,
             mark_price=mark,
             funding_rate=funding,

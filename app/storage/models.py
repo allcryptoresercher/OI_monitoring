@@ -103,6 +103,7 @@ class RawTick(Base):
     base_symbol: Mapped[str] = mapped_column(String(64))
     ts_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     oi_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    oi_qty: Mapped[float | None] = mapped_column(Float, nullable=True)
     last_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     mark_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     funding_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -162,6 +163,20 @@ class CooldownState(Base):
     signal_type: Mapped[str] = mapped_column(String(8))
     last_oi_growth: Mapped[float] = mapped_column(Float, default=0)
     last_sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PriceAlert(Base):
+    __tablename__ = "price_alerts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    base_symbol: Mapped[str] = mapped_column(String(64), index=True)
+    exchange: Mapped[str] = mapped_column(String(32))
+    quote: Mapped[str] = mapped_column(String(16), default="USDT")
+    target_price: Mapped[float] = mapped_column(Float)
+    direction: Mapped[str] = mapped_column(String(8))  # up | down
+    pushover: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ConfigMeta(Base):

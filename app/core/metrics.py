@@ -17,6 +17,8 @@ class WindowMetrics:
     window: str
     oi_now: float | None
     oi_before: float | None
+    oi_qty_now: float | None
+    oi_qty_before: float | None
     oi_growth_pct: float | None
     oi_log_change: float | None
     oi_z: float | None
@@ -31,6 +33,8 @@ class WindowMetrics:
     oi_to_volume: float | None
     long_pct: float | None
     short_pct: float | None
+    long_pct_before: float | None
+    short_pct_before: float | None
     volume_24h: float | None
     history_days: float
     new_history: bool
@@ -90,26 +94,40 @@ def _price(t: RawTick) -> float | None:
     return t.mark_price if t.mark_price is not None else t.last_price
 
 
+def oi_tokens(t: RawTick | None) -> float | None:
+    if t is None:
+        return None
+    qty = getattr(t, "oi_qty", None)
+    if qty:
+        return float(qty)
+    px = _price(t)
+    if t.oi_usd and px and px > 0:
+        return float(t.oi_usd) / px
+    return None
+
+
 def growth_series(ticks: Sequence[RawTick], window_sec: int) -> list[float]:
-    """OI growth % samples over history for z/pctl."""
+    """OI growth % samples over history for z/pctl (по количеству токенов)."""
     if len(ticks) < 2:
         return []
     by_ts = list(ticks)
     out: list[float] = []
-    # sample at most every interval-ish using later ticks
     step = max(1, len(by_ts) // 500)
     for i in range(0, len(by_ts), step):
         now = by_ts[i]
-        if now.oi_usd is None:
+        qn = oi_tokens(now)
+        if qn is None:
             continue
         target = now.ts_utc.timestamp() - window_sec
         before = None
         for j in range(i, -1, -1):
-            if by_ts[j].ts_utc.timestamp() <= target and by_ts[j].oi_usd:
+            qb = oi_tokens(by_ts[j])
+            if by_ts[j].ts_utc.timestamp() <= target and qb:
                 before = by_ts[j]
                 break
-        if before and before.oi_usd and before.oi_usd > 0:
-            out.append((now.oi_usd / before.oi_usd - 1.0) * 100.0)
+        qb = oi_tokens(before)
+        if qb and qb > 0:
+            out.append((qn / qb - 1.0) * 100.0)
     return out
 
 

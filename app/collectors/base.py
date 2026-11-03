@@ -16,6 +16,7 @@ class MarketSnapshot:
     multiplier: float
     ts_utc: datetime
     oi_usd: float | None
+    oi_qty: float | None
     last_price: float | None
     mark_price: float | None
     funding_rate: float | None  # raw fraction e.g. 0.0001

@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import TypeVar
 
-from sqlalchemy import event
+from sqlalchemy import event, inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -75,7 +75,19 @@ async def init_db(engine) -> None:
             await conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
             await conn.exec_driver_sql("PRAGMA busy_timeout=60000")
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_ensure_columns)
     logger.info("DB schema ready (%s)", engine.url.render_as_string(hide_password=True))
+
+
+def _ensure_columns(sync_conn) -> None:
+    """create_all не добавляет колонки в уже существующие таблицы."""
+    inspector = inspect(sync_conn)
+    if "raw_ticks" not in inspector.get_table_names():
+        return
+    cols = {c["name"] for c in inspector.get_columns("raw_ticks")}
+    if "oi_qty" not in cols:
+        sync_conn.execute(text("ALTER TABLE raw_ticks ADD COLUMN oi_qty FLOAT"))
+        logger.info("schema: added raw_ticks.oi_qty")
 
 
 def make_session_factory(engine) -> async_sessionmaker[AsyncSession]:
