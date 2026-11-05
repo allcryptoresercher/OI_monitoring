@@ -185,6 +185,19 @@ class Pipeline:
 
         await asyncio.gather(*[collect_exchange(n, c) for n, c in collectors.items()])
 
+        # Price alerts (after fresh ticks)
+        try:
+            from app.settings import get_settings
+            from app.workers.price_alerts import check_price_alerts
+
+            await check_price_alerts(
+                bot=self.bot,
+                session_factory=self.session_factory,
+                settings=get_settings(),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("price alerts check failed: %s", e)
+
         # Evaluate signals per snapshot
         signal_bases: set[str] = set()
         btc_metrics_by_window: dict[str, object] = {}

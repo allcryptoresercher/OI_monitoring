@@ -79,13 +79,9 @@ def funding_to_8h(funding_rate: float | None, exchange: str) -> float | None:
     """Normalize funding to 8h period. Most perps quote per 8h already; HL may differ."""
     if funding_rate is None:
         return None
-    # Stored as fraction (0.0001 = 0.01%). Convert to percent for display/thresholds in TZ
-    # TZ thresholds like +0.05% mean 0.05 in percent units.
-    # We keep funding_8h as percent value (e.g. 0.012 means 0.012%).
     rate_pct = funding_rate * 100.0
     ex = exchange.lower()
     if ex == "hyperliquid":
-        # HL often hourly — approximate to 8h
         return rate_pct * 8.0
     return rate_pct
 
@@ -104,6 +100,16 @@ def oi_tokens(t: RawTick | None) -> float | None:
     if t.oi_usd and px and px > 0:
         return float(t.oi_usd) / px
     return None
+
+
+def _ls_pct(tick: RawTick | None) -> tuple[float | None, float | None]:
+    if tick is None:
+        return None, None
+    long_pct = tick.long_pct
+    short_pct = tick.short_pct
+    if short_pct is None and long_pct is not None:
+        short_pct = 100.0 - long_pct
+    return long_pct, short_pct
 
 
 def growth_series(ticks: Sequence[RawTick], window_sec: int) -> list[float]:
@@ -187,12 +193,18 @@ def compute_window_metrics(
 
     oi_now = now.oi_usd
     oi_before = before.oi_usd if before else None
+    oi_qty_now = oi_tokens(now)
+    oi_qty_before = oi_tokens(before)
     price_now = _price(now)
     price_before = _price(before) if before else None
 
+    # Рост OI — по количеству токенов (fallback на $ если qty нет)
     oi_growth = None
     oi_log = None
-    if oi_now is not None and oi_before and oi_before > 0:
+    if oi_qty_now is not None and oi_qty_before and oi_qty_before > 0:
+        oi_growth = (oi_qty_now / oi_qty_before - 1.0) * 100.0
+        oi_log = math.log(oi_qty_now / oi_qty_before)
+    elif oi_now is not None and oi_before and oi_before > 0:
         oi_growth = (oi_now / oi_before - 1.0) * 100.0
         oi_log = math.log(oi_now / oi_before)
 
@@ -227,10 +239,15 @@ def compute_window_metrics(
     if oi_now and now.volume_24h and now.volume_24h > 0:
         oi_to_vol = oi_now / now.volume_24h
 
+    long_pct, short_pct = _ls_pct(now)
+    long_before, short_before = _ls_pct(before)
+
     return WindowMetrics(
         window=window,
         oi_now=oi_now,
         oi_before=oi_before,
+        oi_qty_now=oi_qty_now,
+        oi_qty_before=oi_qty_before,
         oi_growth_pct=oi_growth,
         oi_log_change=oi_log,
         oi_z=oi_z,
@@ -243,10 +260,10 @@ def compute_window_metrics(
         ratio=ratio,
         funding_8h=funding_to_8h(now.funding_rate, exchange),
         oi_to_volume=oi_to_vol,
-        long_pct=now.long_pct,
-        short_pct=now.short_pct if now.short_pct is not None else (
-            100.0 - now.long_pct if now.long_pct is not None else None
-        ),
+        long_pct=long_pct,
+        short_pct=short_pct,
+        long_pct_before=long_before,
+        short_pct_before=short_before,
         volume_24h=now.volume_24h,
         history_days=history_days,
         new_history=new_history,

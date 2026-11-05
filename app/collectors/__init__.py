@@ -6,6 +6,7 @@ import aiohttp
 
 from app.collectors.aster import AsterCollector
 from app.collectors.binance import BinanceCollector
+from app.collectors.bingx import BingxCollector
 from app.collectors.bitget import BitgetCollector
 from app.collectors.bybit import BybitCollector
 from app.collectors.hyperliquid import HyperliquidCollector
@@ -19,6 +20,7 @@ def build_collectors(session: aiohttp.ClientSession, cfg: AppConfig) -> dict:
         "bitget": BitgetCollector,
         "hyperliquid": HyperliquidCollector,
         "aster": AsterCollector,
+        "bingx": BingxCollector,
     }
     out = {}
     for name in cfg.exchanges:

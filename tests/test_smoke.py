@@ -55,6 +55,11 @@ def test_metrics_and_s1():
     current = ticks[-1]
     # force big growth
     current.oi_usd = before.oi_usd * 1.2
+    current.oi_qty = (before.oi_qty or (before.oi_usd / 60000)) * 1.2
+    before.oi_qty = before.oi_qty or (before.oi_usd / 60000)
+    for t in ticks:
+        if t.oi_qty is None and t.oi_usd and t.mark_price:
+            t.oi_qty = t.oi_usd / t.mark_price
     m = compute_window_metrics(current, before, ticks, "4h", cfg, "binance")
     assert m.oi_growth_pct is not None and m.oi_growth_pct > 15
     fired = evaluate_signals({"4h": m, "1h": m, "24h": m}, cfg)
@@ -68,6 +73,8 @@ def test_filters_f1():
         window="1h",
         oi_now=1000,
         oi_before=900,
+        oi_qty_now=1000,
+        oi_qty_before=900,
         oi_growth_pct=10,
         oi_log_change=None,
         oi_z=None,
@@ -82,6 +89,8 @@ def test_filters_f1():
         oi_to_volume=0.1,
         long_pct=50,
         short_pct=50,
+        long_pct_before=50,
+        short_pct_before=50,
         volume_24h=1000,
         history_days=10,
         new_history=False,

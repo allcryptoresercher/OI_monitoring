@@ -24,6 +24,7 @@ exchanges:
   - bitget
   - hyperliquid
   - aster
+  - bingx
 
 normalization:
   strip_prefixes:

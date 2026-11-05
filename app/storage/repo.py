@@ -13,6 +13,7 @@ from app.storage.models import (
     ConfigMeta,
     ExchangeHealth,
     Instrument,
+    PriceAlert,
     RawTick,
     Signal,
     User,
@@ -707,3 +708,101 @@ async def purge_old_ticks(session: AsyncSession, keep_days: int = 30) -> int:
     result = await session.execute(delete(RawTick).where(RawTick.ts_utc < cutoff))
     await session.commit()
     return result.rowcount or 0
+
+
+async def aggregate_oi_ath_atl(
+    session: AsyncSession, legs: list[tuple[str, str]]
+) -> tuple[float | None, float | None]:
+    """Мин/макс суммы OI$ по ногам (приближённо по уникальным timestamp'ам)."""
+    if not legs:
+        return None, None
+    # Берём последние ~14 дней тиков по каждой ноге и суммируем по минутному бакету
+    since = datetime.now(timezone.utc) - timedelta(days=30)
+    from collections import defaultdict
+
+    bucket: dict[int, float] = defaultdict(float)
+    for exchange, base in legs:
+        rows = (
+            await session.execute(
+                select(RawTick.ts_utc, RawTick.oi_usd).where(
+                    RawTick.exchange == exchange,
+                    RawTick.base_symbol == base,
+                    RawTick.ts_utc >= since,
+                    RawTick.oi_usd.is_not(None),
+                )
+            )
+        ).all()
+        for ts, oi in rows:
+            if oi is None:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            key = int(ts.timestamp()) // 60
+            bucket[key] += float(oi)
+    if not bucket:
+        return None, None
+    vals = list(bucket.values())
+    return max(vals), min(vals)
+
+
+async def create_price_alert(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    base_symbol: str,
+    exchange: str,
+    target_price: float,
+    direction: str,
+    quote: str = "USDT",
+    pushover: bool = False,
+) -> PriceAlert:
+    alert = PriceAlert(
+        user_id=user_id,
+        base_symbol=base_symbol.upper(),
+        exchange=exchange.lower(),
+        quote=quote,
+        target_price=target_price,
+        direction=direction,
+        pushover=pushover,
+    )
+    session.add(alert)
+    await session.commit()
+    await session.refresh(alert)
+    return alert
+
+
+async def list_price_alerts(session: AsyncSession, user_id: int) -> list[PriceAlert]:
+    result = await session.execute(
+        select(PriceAlert)
+        .where(PriceAlert.user_id == user_id)
+        .order_by(PriceAlert.id.asc())
+    )
+    return list(result.scalars().all())
+
+
+async def get_price_alert(session: AsyncSession, alert_id: int) -> PriceAlert | None:
+    return await session.get(PriceAlert, alert_id)
+
+
+async def toggle_price_alert_pushover(
+    session: AsyncSession, alert_id: int, user_id: int
+) -> PriceAlert | None:
+    alert = await session.get(PriceAlert, alert_id)
+    if not alert or alert.user_id != user_id:
+        return None
+    alert.pushover = not alert.pushover
+    await session.commit()
+    await session.refresh(alert)
+    return alert
+
+
+async def delete_price_alert(session: AsyncSession, alert_id: int) -> None:
+    alert = await session.get(PriceAlert, alert_id)
+    if alert:
+        await session.delete(alert)
+        await session.commit()
+
+
+async def list_all_price_alerts(session: AsyncSession) -> list[PriceAlert]:
+    result = await session.execute(select(PriceAlert).order_by(PriceAlert.id.asc()))
+    return list(result.scalars().all())

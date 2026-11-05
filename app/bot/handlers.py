@@ -36,13 +36,22 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
-KNOWN_EXCHANGES = {"binance", "bybit", "bitget", "hyperliquid", "aster", "hl"}
+KNOWN_EXCHANGES = {
+    "binance",
+    "bybit",
+    "bitget",
+    "hyperliquid",
+    "aster",
+    "bingx",
+    "hl",
+}
 
 
 class Form(StatesGroup):
     waiting_check = State()
     waiting_add = State()
     waiting_otchet = State()
+    waiting_alert = State()
 
 
 def _is_admin(message: Message, settings: Settings) -> bool:
@@ -112,6 +121,8 @@ def setup_bot_routes(
             "/check — проверить тикер (биржи, OI, L/S)\n"
             "/add — добавить пары биржа+тикер (разные имена)\n"
             "/otchet — сводка OI/цены по таймфреймам\n"
+            "/alert — ценовой алерт (биржа тикер цена)\n"
+            "/alerts — список ценовых алертов\n"
             "/remove — убрать тикер (кнопки)\n"
             "/list — список мониторинга"
         )
@@ -309,6 +320,160 @@ def setup_bot_routes(
             logger.exception("otchet failed")
             await message.answer(f"Ошибка отчёта: {e}")
         await state.clear()
+
+    def _alerts_keyboard(alerts) -> InlineKeyboardMarkup:
+        rows = []
+        for a in alerts:
+            mark = "🔔 ON" if a.pushover else "🔕 OFF"
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"{a.base_symbol} {a.exchange} Pushover: {mark}",
+                        callback_data=f"po:{a.id}",
+                    )
+                ]
+            )
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    def _format_alerts_list(alerts) -> str:
+        if not alerts:
+            return "Твои ценовые алерты:\n\n(пусто)\n\nСоздать: /alert"
+        lines = ["Твои ценовые алерты:", ""]
+        for a in alerts:
+            direction_ru = "Рост" if a.direction == "up" else "Падение"
+            po = "🔔 ON" if a.pushover else "🔕 OFF"
+            lines.append(f"• {a.base_symbol}/{a.quote} на {a.exchange.upper()} (фьючерс)")
+            lines.append(f"  Цель: {a.target_price} | Тип: {direction_ru}")
+            lines.append(f"  Pushover: {po}")
+            lines.append("")
+        return "\n".join(lines).rstrip()
+
+    # —— /alert ——
+    @router.message(Command("alert"))
+    async def cmd_alert(message: Message, state: FSMContext, command: CommandObject) -> None:
+        if command.args:
+            ok = await _create_alert_from_text(message, command.args.strip())
+            if ok:
+                await state.clear()
+            return
+        await state.set_state(Form.waiting_alert)
+        await message.answer(
+            "Введите: <биржа> <тикер> <цена>\n"
+            "Пример: binance ELSA 1.29\n"
+            "или: bingx HYPE 77.5"
+        )
+
+    @router.message(Form.waiting_alert, F.text)
+    async def on_alert_input(message: Message, state: FSMContext) -> None:
+        text = (message.text or "").strip()
+        if text.startswith("/"):
+            await state.clear()
+            await message.answer("Ожидание сброшено.")
+            return
+        ok = await _create_alert_from_text(message, text)
+        if ok:
+            await state.clear()
+
+    async def _create_alert_from_text(message: Message, text: str) -> bool:
+        cfg = config_store.config
+        parts = text.replace(",", " ").split()
+        if len(parts) < 3:
+            await message.answer("Нужно: <биржа> <тикер> <цена>\nПример: binance BTC 95000")
+            return False
+        ex = _normalize_exchange(parts[0])
+        if not ex:
+            await message.answer(
+                "Неизвестная биржа. Доступны: binance, bybit, bitget, aster, bingx, hyperliquid"
+            )
+            return False
+        base = normalize_user_input(parts[1], cfg.normalization)
+        try:
+            price = float(parts[2].replace(",", "."))
+        except ValueError:
+            await message.answer("Цена должна быть числом")
+            return False
+        if not base or price <= 0:
+            await message.answer("Некорректный тикер или цена")
+            return False
+
+        # текущая цена на бирже
+        rows = await lookup_base_on_exchanges(base, cfg)
+        row = next((r for r in rows if r.exchange == ex and r.available), None)
+        if not row or row.price is None:
+            await message.answer(f"{base} не найден на {ex.capitalize()}")
+            return False
+        direction = "up" if price > row.price else "down"
+        direction_ru = "Рост" if direction == "up" else "Падение"
+
+        async with session_factory() as session:
+            user = await repo.get_or_create_user(
+                session, message.from_user.id, settings.admin_id_set
+            )
+            alert = await repo.create_price_alert(
+                session,
+                user_id=user.id,
+                base_symbol=base,
+                exchange=ex,
+                target_price=price,
+                direction=direction,
+                quote="USDT",
+                pushover=False,
+            )
+            alerts = await repo.list_price_alerts(session, user.id)
+
+        card = (
+            f"• {base}/USDT на {ex.upper()} (фьючерс)\n"
+            f"  Цель: {price} | Тип: {direction_ru}\n"
+            f"  Сейчас: {row.price}\n"
+            f"  Pushover: 🔕 OFF"
+        )
+        await message.answer(
+            "Алерт создан:\n\n" + card,
+            reply_markup=_alerts_keyboard([alert]),
+        )
+        if len(alerts) > 1:
+            await message.answer(_format_alerts_list(alerts), reply_markup=_alerts_keyboard(alerts))
+        return True
+
+    @router.message(Command("alerts"))
+    async def cmd_alerts(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        async with session_factory() as session:
+            user = await repo.get_or_create_user(
+                session, message.from_user.id, settings.admin_id_set
+            )
+            alerts = await repo.list_price_alerts(session, user.id)
+        kb = _alerts_keyboard(alerts) if alerts else None
+        await message.answer(_format_alerts_list(alerts), reply_markup=kb)
+
+    @router.callback_query(F.data.startswith("po:"))
+    async def on_pushover_toggle(query: CallbackQuery) -> None:
+        try:
+            alert_id = int((query.data or "").split(":")[1])
+        except (IndexError, ValueError):
+            await query.answer("Ошибка")
+            return
+        async with session_factory() as session:
+            user = await repo.get_or_create_user(
+                session, query.from_user.id, settings.admin_id_set
+            )
+            alert = await repo.toggle_price_alert_pushover(session, alert_id, user.id)
+            alerts = await repo.list_price_alerts(session, user.id)
+        if not alert:
+            await query.answer("Алерт не найден")
+            return
+        mark = "ON" if alert.pushover else "OFF"
+        await query.answer(f"Pushover {mark}")
+        try:
+            await query.message.edit_text(
+                _format_alerts_list(alerts),
+                reply_markup=_alerts_keyboard(alerts) if alerts else None,
+            )
+        except Exception:  # noqa: BLE001
+            await query.message.answer(
+                _format_alerts_list(alerts),
+                reply_markup=_alerts_keyboard(alerts) if alerts else None,
+            )
 
     # —— /remove (кнопки) ——
     @router.message(Command("remove"))

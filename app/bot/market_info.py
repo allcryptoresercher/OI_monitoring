@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collectors import build_collectors
 from app.config import AppConfig
+from app.core.metrics import oi_tokens
 from app.core.normalize import parse_window_to_seconds
 from app.core.timeutils import ensure_utc, utcnow
 from app.storage import repo
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 TZ_UTC7 = timezone(timedelta(hours=7))
 
-REPORT_WINDOWS = ["5m", "15m", "1h", "4h", "12h", "1d", "1w"]
+REPORT_WINDOWS = ["5m", "15m", "1h", "4h", "1d", "1w"]
 
 
 @dataclass
@@ -49,6 +50,33 @@ def format_oi(v: float | None) -> str:
     return f"${v:.4g}"
 
 
+def format_usd_short(v: float | None) -> str:
+    """4.12M$ style."""
+    if v is None:
+        return "—"
+    abs_v = abs(v)
+    if abs_v >= 1_000_000_000:
+        return f"{v / 1_000_000_000:.2f}B$"
+    if abs_v >= 1_000_000:
+        return f"{v / 1_000_000:.2f}M$"
+    if abs_v >= 1_000:
+        return f"{v / 1_000:.1f}K$"
+    return f"{v:.4g}$"
+
+
+def format_qty(v: float | None) -> str:
+    if v is None:
+        return "—"
+    abs_v = abs(v)
+    if abs_v >= 1_000_000_000:
+        return f"{v / 1_000_000_000:.2f}B"
+    if abs_v >= 1_000_000:
+        return f"{v / 1_000_000:.2f}M"
+    if abs_v >= 1_000:
+        return f"{v / 1_000:.1f}K"
+    return f"{v:.4g}"
+
+
 def format_price(v: float | None) -> str:
     if v is None:
         return "—"
@@ -64,6 +92,15 @@ def format_ls(long_pct: float | None, short_pct: float | None) -> str:
         return "—"
     short = short_pct if short_pct is not None else 100.0 - long_pct
     return f"{long_pct:.1f}/{short:.1f}"
+
+
+def format_ls_ratio(long_pct: float | None, short_pct: float | None) -> str:
+    if long_pct is None:
+        return "—"
+    short = short_pct if short_pct is not None else 100.0 - long_pct
+    if short is None or short == 0:
+        return "—"
+    return f"{long_pct / short:.2f}"
 
 
 def format_pct(v: float | None) -> str:
@@ -124,7 +161,6 @@ async def lookup_base_on_exchanges(base: str, cfg: AppConfig) -> list[ExchangeOi
 
 
 def format_check_report(base: str, rows: list[ExchangeOiRow]) -> str:
-    """Доступные биржи: Exch | Price | OI | Long/Short."""
     available = [r for r in rows if r.available]
     lines = [f"Токен: {base}", ""]
     if not available:
@@ -180,10 +216,6 @@ def format_list_report(
     entries: list[tuple[str, datetime | None]],
     exch_map: dict[str, list[str]],
 ) -> str:
-    """
-    Отслеживаются
-    <Тикер> - <Биржи>, <дата добавления UTC+7>
-    """
     lines = ["Отслеживаются", ""]
     if not entries:
         lines.append("(пусто)")
@@ -202,18 +234,32 @@ def _tick_price(tick) -> float | None:
     return tick.mark_price if tick.mark_price is not None else tick.last_price
 
 
+def _qt_qs(qty: float | None, usd: float | None) -> str:
+    return f"{format_qty(qty)}/{format_usd_short(usd)}"
+
+
+def _row(
+    name: str,
+    qt_qs: str,
+    oi_pct: str,
+    price_pct: str,
+    ls: str,
+    voll: str,
+) -> str:
+    return f"{name:<9} {qt_qs:<16} {oi_pct:<8} {price_pct:<8} {ls:<5} {voll}"
+
+
 async def build_otchet_report(
     session: AsyncSession,
     user_id: int | None,
     ticker: str,
 ) -> str:
-    """Широкоформатная сводка по таймфреймам, выравнивание влево."""
+    """Табличная сводка: now + таймфреймы, QT/Q$, L/S ratio."""
     display, legs = await repo.resolve_report_legs(session, user_id, ticker)
     if not legs:
         return f"{display}\n\nНет данных в истории. Добавьте тикер в мониторинг и подождите сбора."
 
     now = utcnow()
-    # актуальные ноги: только те, где есть свежий тик
     live_legs: list[tuple[str, str, object]] = []
     for exchange, base in legs:
         tick = await repo.latest_tick_for_base(session, exchange, base)
@@ -223,63 +269,166 @@ async def build_otchet_report(
     if not live_legs:
         return f"{display}\n\nНет свежих тиков по тикеру."
 
+    # ATH/ATL суммарного OI$ по истории (сэмпл по timestamp buckets)
+    ath, atl = await repo.aggregate_oi_ath_atl(
+        session, [(ex, base) for ex, base, _ in live_legs]
+    )
+
     lines = [display, ""]
+    if atl is not None:
+        lines.append(f"OI_aggr_all_time_low   {format_usd_short(atl)}")
+    if ath is not None:
+        lines.append(f"OI_aggr_all_time_high  {format_usd_short(ath)}")
+    if ath is not None or atl is not None:
+        lines.append("")
+
+    # —— now: текущие QT/Q$, без % изменения ——
+    lines.append(_row("now", "QT/Q$", "ОИ", "Price", "L/S", "Voll"))
+    for exchange, _base, tick_now in live_legs:
+        qty = oi_tokens(tick_now)
+        usd = tick_now.oi_usd
+        long_pct = tick_now.long_pct
+        short_pct = tick_now.short_pct if tick_now.short_pct is not None else (
+            100.0 - long_pct if long_pct is not None else None
+        )
+        vol = tick_now.volume_24h
+        lines.append(
+            _row(
+                exchange.capitalize(),
+                _qt_qs(qty, usd),
+                "—",
+                "—",
+                format_ls_ratio(long_pct, short_pct),
+                format_usd_short(vol),
+            )
+        )
+    lines.append("")
+
     any_window = False
     for window in REPORT_WINDOWS:
         sec = parse_window_to_seconds(window)
         before_ts = now - timedelta(seconds=sec)
-        per_ex: list[tuple[str, float, float | None, float | None]] = []
-        # (name, oi_now, oi_chg, price_chg)
-        oi_now_sum = 0.0
-        oi_before_sum = 0.0
+        per_ex: list[
+            tuple[
+                str,
+                float | None,
+                float | None,
+                float | None,
+                float | None,
+                float | None,
+                float | None,
+                float | None,
+            ]
+        ] = []
+        oi_qty_now_sum = 0.0
+        oi_qty_before_sum = 0.0
+        oi_usd_before_sum = 0.0
+        oi_usd_now_sum = 0.0
         price_chgs: list[float] = []
+        ls_longs: list[float] = []
+        ls_shorts: list[float] = []
+        vol_sum = 0.0
         usable = 0
+
         for exchange, base, tick_now in live_legs:
-            before = await repo.tick_at_or_before_base(
-                session, exchange, base, before_ts
-            )
-            if before is None or before.oi_usd is None or tick_now.oi_usd is None:
+            before = await repo.tick_at_or_before_base(session, exchange, base, before_ts)
+            if before is None:
                 continue
             before.ts_utc = ensure_utc(before.ts_utc)
-            # слишком свежий «before» (меньше половины окна) — данных мало
             age = (ensure_utc(tick_now.ts_utc) - before.ts_utc).total_seconds()
             if age < sec * 0.5:
                 continue
-            oi_now = float(tick_now.oi_usd)
-            oi_before = float(before.oi_usd)
-            if oi_before <= 0:
-                continue
-            oi_chg = (oi_now / oi_before - 1.0) * 100.0
+            q_now = oi_tokens(tick_now)
+            q_before = oi_tokens(before)
+            usd_now = tick_now.oi_usd
+            usd_before = before.oi_usd
+            if q_before is None or q_before <= 0 or q_now is None:
+                # fallback $ growth if no qty
+                if usd_before is None or usd_before <= 0 or usd_now is None:
+                    continue
+                oi_chg = (usd_now / usd_before - 1.0) * 100.0
+            else:
+                oi_chg = (q_now / q_before - 1.0) * 100.0
             pn = _tick_price(tick_now)
             pb = _tick_price(before)
             price_chg = None
             if pn is not None and pb and pb > 0:
                 price_chg = (pn / pb - 1.0) * 100.0
                 price_chgs.append(price_chg)
-            per_ex.append((exchange.capitalize(), oi_now, oi_chg, price_chg))
-            oi_now_sum += oi_now
-            oi_before_sum += oi_before
+            long_pct = tick_now.long_pct
+            short_pct = tick_now.short_pct if tick_now.short_pct is not None else (
+                100.0 - long_pct if long_pct is not None else None
+            )
+            if long_pct is not None and short_pct is not None:
+                ls_longs.append(long_pct)
+                ls_shorts.append(short_pct)
+            vol = tick_now.volume_24h
+            per_ex.append(
+                (
+                    exchange.capitalize(),
+                    q_before,
+                    usd_before,
+                    oi_chg,
+                    price_chg,
+                    long_pct,
+                    short_pct,
+                    vol,
+                )
+            )
+            if q_now:
+                oi_qty_now_sum += q_now
+            if q_before:
+                oi_qty_before_sum += q_before
+            if usd_now:
+                oi_usd_now_sum += usd_now
+            if usd_before:
+                oi_usd_before_sum += usd_before
+            if vol:
+                vol_sum += vol
             usable += 1
+
         if usable == 0:
             continue
         any_window = True
-        agg_chg = (oi_now_sum / oi_before_sum - 1.0) * 100.0 if oi_before_sum > 0 else None
-        # агрегированное изменение цены — среднее по биржам с данными
+        agg_oi_chg = None
+        if oi_qty_before_sum > 0 and oi_qty_now_sum > 0:
+            agg_oi_chg = (oi_qty_now_sum / oi_qty_before_sum - 1.0) * 100.0
+        elif oi_usd_before_sum > 0 and oi_usd_now_sum > 0:
+            agg_oi_chg = (oi_usd_now_sum / oi_usd_before_sum - 1.0) * 100.0
         agg_price = sum(price_chgs) / len(price_chgs) if price_chgs else None
-        lines.append(window)
+        agg_ls = "—"
+        if ls_longs and ls_shorts:
+            avg_l = sum(ls_longs) / len(ls_longs)
+            avg_s = sum(ls_shorts) / len(ls_shorts)
+            agg_ls = format_ls_ratio(avg_l, avg_s)
+
+        lines.append(_row(window, "QT/Q$", "ОИ", "Price", "L/S", "Voll"))
         lines.append(
-            f"OI {format_oi(oi_now_sum)}  {format_pct(agg_chg)}  "
-            f"Price {format_pct(agg_price)}"
+            _row(
+                "OI",
+                _qt_qs(
+                    oi_qty_before_sum if oi_qty_before_sum else None,
+                    oi_usd_before_sum if oi_usd_before_sum else None,
+                ),
+                format_pct(agg_oi_chg),
+                format_pct(agg_price),
+                agg_ls,
+                format_usd_short(vol_sum if vol_sum else None),
+            )
         )
-        for name, oi_now, oi_chg, price_chg in per_ex:
+        for name, q_ago, usd_ago, oi_chg, price_chg, long_pct, short_pct, vol in per_ex:
             lines.append(
-                f"{name}  {format_oi(oi_now)}  {format_pct(oi_chg)}  "
-                f"Price {format_pct(price_chg)}"
+                _row(
+                    name,
+                    _qt_qs(q_ago, usd_ago),
+                    format_pct(oi_chg),
+                    format_pct(price_chg),
+                    format_ls_ratio(long_pct, short_pct),
+                    format_usd_short(vol),
+                )
             )
         lines.append("")
+
     if not any_window:
-        return (
-            f"{display}\n\n"
-            "Недостаточно истории для таймфреймов (нужны тики старше окна)."
-        )
+        lines.append("Недостаточно истории для таймфреймов (нужны тики старше окна).")
     return "\n".join(lines).rstrip() + "\n"

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import BotCommand
 
 # ensure project root on path
 ROOT = Path(__file__).resolve().parent
@@ -57,6 +58,17 @@ async def amain() -> None:
         await repo.save_config_meta(session, config_store.hash)
 
     bot = Bot(token=settings.bot_token)
+    await bot.set_my_commands(
+        [
+            BotCommand(command="check", description="Проверить тикер (OI, L/S)"),
+            BotCommand(command="add", description="Добавить пары биржа+тикер"),
+            BotCommand(command="otchet", description="Сводка по таймфреймам"),
+            BotCommand(command="alert", description="Создать ценовой алерт"),
+            BotCommand(command="alerts", description="Список ценовых алертов"),
+            BotCommand(command="list", description="Список мониторинга"),
+            BotCommand(command="remove", description="Удалить из мониторинга"),
+        ]
+    )
     dp = Dispatcher(storage=MemoryStorage())
     setup_bot_routes(dp, session_factory, config_store, settings)
 

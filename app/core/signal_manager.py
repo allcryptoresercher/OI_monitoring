@@ -26,12 +26,26 @@ def _fmt_usd(v: float | None) -> str:
         return "—"
     abs_v = abs(v)
     if abs_v >= 1_000_000_000:
-        return f"${v/1_000_000_000:.2f}B"
+        return f"{v/1_000_000_000:.2f}B$"
     if abs_v >= 1_000_000:
-        return f"${v/1_000_000:.2f}M"
+        return f"{v/1_000_000:.2f}M$"
     if abs_v >= 1_000:
-        return f"${v/1_000:.1f}K"
-    return f"${v:.4g}"
+        return f"{v/1_000:.1f}K$"
+    return f"{v:.4g}$"
+
+
+def _fmt_qty(v: float | None) -> str:
+    """OI в токенах: K / M / B."""
+    if v is None:
+        return "—"
+    abs_v = abs(v)
+    if abs_v >= 1_000_000_000:
+        return f"{v/1_000_000_000:.2f}B"
+    if abs_v >= 1_000_000:
+        return f"{v/1_000_000:.2f}M"
+    if abs_v >= 1_000:
+        return f"{v/1_000:.1f}K"
+    return f"{v:.4g}"
 
 
 def _fmt_pct(v: float | None, signed: bool = True) -> str:
@@ -52,6 +66,13 @@ def _fmt_price(v: float | None) -> str:
     return f"{v:.6g}"
 
 
+def _fmt_ls(long_pct: float | None, short_pct: float | None) -> str:
+    if long_pct is None:
+        return "—"
+    short = short_pct if short_pct is not None else 100.0 - long_pct
+    return f"{long_pct:.1f}/{short:.1f}"
+
+
 def format_signal_message(
     *,
     base: str,
@@ -63,26 +84,43 @@ def format_signal_message(
     flags: dict[str, Any],
     ts: datetime,
 ) -> str:
-    del flags, ts  # reserved for future flags; not shown in compact template
+    del flags, ts
     codes = sorted({f.code for f in fired})
     titles = " + ".join(codes)
     regime = next((f.details.get("regime") for f in fired if f.code == "S2"), None)
     names = " + ".join(f"{c} {SIGNAL_NAMES.get(c, '')}" for c in codes)
     status = "confirmed" if s7_status == "confirmed" else "new"
+    ls_now = _fmt_ls(metrics.long_pct, metrics.short_pct)
+    ls_before = _fmt_ls(metrics.long_pct_before, metrics.short_pct_before)
     lines = [
         f"🚨 {titles} {base} · {window.upper()} {exchange.capitalize()}",
         names,
-        f"OI       {_fmt_pct(metrics.oi_growth_pct)}   {_fmt_usd(metrics.oi_before)} → {_fmt_usd(metrics.oi_now)}",
+        (
+            f"OI       {_fmt_pct(metrics.oi_growth_pct)}  "
+            f"{_fmt_qty(metrics.oi_qty_before)} → {_fmt_qty(metrics.oi_qty_now)}  "
+            f"({_fmt_usd(metrics.oi_before)} → {_fmt_usd(metrics.oi_now)})"
+        ),
         (
             f"Price     {_fmt_pct(metrics.price_change_pct)} "
             f"{_fmt_price(metrics.price_before)} → {_fmt_price(metrics.price_now)}"
         ),
         f"Funding   {_fmt_pct(metrics.funding_8h)}",
     ]
-    if metrics.long_pct is not None:
-        short = metrics.short_pct if metrics.short_pct is not None else 100 - metrics.long_pct
-        lines.append(f"L/S       {metrics.long_pct:.1f} / {short:.1f}")
-    lines.append(f"Vol 24h   {_fmt_usd(metrics.volume_24h)}")
+    if metrics.long_pct is not None or metrics.long_pct_before is not None:
+        lines.append(f"L/S       {ls_before} → {ls_now}")
+    if metrics.volume_24h is None:
+        lines.append("Vol 24h   —")
+    else:
+        abs_v = abs(metrics.volume_24h)
+        if abs_v >= 1_000_000_000:
+            vol_s = f"${metrics.volume_24h/1_000_000_000:.2f}B"
+        elif abs_v >= 1_000_000:
+            vol_s = f"${metrics.volume_24h/1_000_000:.2f}M"
+        elif abs_v >= 1_000:
+            vol_s = f"${metrics.volume_24h/1_000:.1f}K"
+        else:
+            vol_s = f"${metrics.volume_24h:.4g}"
+        lines.append(f"Vol 24h   {vol_s}")
     if metrics.oi_to_volume is not None:
         lines.append(f"OI/Vol    {metrics.oi_to_volume:.3f}")
     if regime:
@@ -109,11 +147,7 @@ async def persist_and_notify(
     flags: dict[str, Any],
     ts: datetime,
 ) -> None:
-    """Сохранение сигнала и рассылка.
-
-    Важно: Telegram send_message НЕ держит write-lock БД —
-    иначе SQLite получает database is locked.
-    """
+    """Сохранение сигнала и рассылка."""
     if not fired:
         return
     codes = sorted({f.code for f in fired})
@@ -139,8 +173,7 @@ async def persist_and_notify(
     )
     oi_growth = metrics.oi_growth_pct
 
-    async def _claim() -> list[tuple[int, int, list[str]]]:
-        """Сохранить сигнал + зарезервировать delivery. Без сетевых вызовов."""
+    async def _claim() -> list[tuple[int, int, list[str], str]]:
         async with db_write_lock():
             async with session_factory() as session:
                 sig = await repo.save_signal(
