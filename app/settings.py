@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     pushover_user: str = Field(default="", alias="PUSHOVER_USER")
     confirmed_bot_token: str = Field(default="", alias="CONFIRMED_BOT_TOKEN")
     confirmed_chat_ids: str = Field(default="", alias="CONFIRMED_CHAT_IDS")
+    chart_host: str = Field(default="127.0.0.1", alias="CHART_HOST")
+    chart_port: int = Field(default=8000, alias="CHART_PORT")
+    chart_token: str = Field(default="", alias="CHART_TOKEN")
 
     @property
     def admin_id_set(self) -> set[int]:

@@ -1,0 +1,21 @@
+# Страница графика. Запуск отдельно от oi-bot.
+# sudo cp /root/OI_monitoring/deploy/oi-chart.service /etc/systemd/system/oi-chart.service
+# sudo systemctl daemon-reload && sudo systemctl enable --now oi-chart
+
+[Unit]
+Description=OI chart page
+After=network-online.target oi-bot.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/OI_monitoring
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/root/OI_monitoring/.env
+ExecStart=/root/OI_monitoring/venv/bin/python -m app.chart
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

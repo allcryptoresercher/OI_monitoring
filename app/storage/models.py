@@ -188,6 +188,20 @@ class ConfirmedPushover(Base):
     last_sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class ChartDrawing(Base):
+    """Рисунки графика: уровень, отрезок, прямоугольник."""
+
+    __tablename__ = "chart_drawings"
+    __table_args__ = (Index("ix_chart_draw_coin_tf", "coin", "timeframe"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    coin: Mapped[str] = mapped_column(String(64))
+    timeframe: Mapped[str] = mapped_column(String(16))
+    name: Mapped[str] = mapped_column(String(64))
+    points_json: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class ConfigMeta(Base):
     __tablename__ = "config_meta"
 

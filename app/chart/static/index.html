@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>График OI</title>
+  <script src="https://unpkg.com/klinecharts@9.8.10/dist/umd/klinecharts.min.js"></script>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: #111; color: #ddd; }
+    header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 12px; }
+    select, button { background: #1c1c1c; color: #ddd; border: 1px solid #333; border-radius: 4px; padding: 4px 8px; }
+    button.active { background: #2a4a6a; border-color: #3d6f99; }
+    #chart { height: 68vh; }
+    #message { white-space: pre-wrap; margin: 0; padding: 12px; min-height: 4.5em; color: #ccc; }
+    .hint { color: #888; font-size: 12px; padding: 0 12px 8px; }
+  </style>
+</head>
+<body>
+  <header>
+    <select id="coin"></select>
+    <span id="tfs"></span>
+    <span id="exs"></span>
+    <span id="tools"></span>
+    <button id="save" type="button">Сохранить рисунки</button>
+    <button id="png" type="button">Скачать PNG</button>
+  </header>
+  <div id="chart"></div>
+  <p class="hint" id="hint">Маркет-дельта — линия за каждую свечу. Ноль — пунктир. Точка — сигнал, цвет это код S1–S7.</p>
+  <pre id="message">Выберите монету. Нажатие на точку покажет текст сигнала.</pre>
+  <script>
+    const TOKEN = new URLSearchParams(location.search).get("token") || "";
+    const TFS = ["5m", "15m", "1h", "4h", "1d"];
+    const EXS = ["binance", "bybit", "bitget", "hyperliquid", "aster", "bingx", "gate", "mexc"];
+    const CODES = ["S1", "S2", "S3", "S4", "S5", "S6", "S7"];
+    const CODE_COLOR = {
+      S1: "#2E79B5", S2: "#1F8A65", S3: "#C0A030", S4: "#C06028",
+      S5: "#C04848", S6: "#7B64B8", S7: "#70B0D8"
+    };
+    const TOOLS = [
+      ["Курсор", ""],
+      ["Уровень", "horizontalStraightLine"],
+      ["Отрезок", "segment"],
+      ["Прямоугольник", "rect"]
+    ];
+    const state = { tf: "15m", ex: Object.fromEntries(EXS.map((e) => [e, true])), tool: "", payload: null, drawings: [] };
+
+    function headers() {
+      const h = { "Content-Type": "application/json" };
+      if (TOKEN) h["X-Chart-Token"] = TOKEN;
+      return h;
+    }
+
+    function buttonRow(parent, items, current, onPick) {
+      parent.innerHTML = "";
+      items.forEach((item) => {
+        const [label, value] = Array.isArray(item) ? item : [item, item];
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = label;
+        btn.className = value === current ? "active" : "";
+        btn.onclick = () => onPick(value, btn);
+        parent.appendChild(btn);
+      });
+    }
+
+    klinecharts.registerIndicator({
+      name: "MD",
+      shortName: "Маркет-дельта $",
+      shouldFormatBigNumber: true,
+      figures: [
+        { key: "md", title: "Δ", type: "line" },
+        { key: "zero", title: "0", type: "line" }
+      ],
+      styles: {
+        lines: [
+          { color: "#70B0D8", size: 1.5 },
+          { color: "#9a9a9a", size: 1, style: "dashed", dashedValue: [4, 3] }
+        ]
+      },
+      calc: (dataList) => dataList.map((bar) => ({ md: bar.delta == null ? null : bar.delta, zero: 0 }))
+    });
+
+    klinecharts.registerOverlay({
+      name: "signalDot",
+      totalStep: 2,
+      lock: true,
+      needDefaultPointFigure: false,
+      createPointFigures: ({ coordinates, overlay }) => {
+        const point = coordinates[0];
+        if (!point) return [];
+        const extra = overlay.extendData || {};
+        return [
+          { type: "circle", attrs: { x: point.x, y: point.y, r: 5 }, styles: { style: "fill", color: extra.color || "#ddd" } },
+          { type: "text", attrs: { x: point.x + 8, y: point.y, text: extra.code || "", align: "left", baseline: "middle" }, styles: { color: "#ccc", size: 11 } }
+        ];
+      }
+    });
+
+    const chart = klinecharts.init("chart", { styles: { grid: { horizontal: { color: "#222" }, vertical: { color: "#222" } } } });
+    chart.createIndicator("MD", false, { id: "md", height: 140 });
+
+    function showSignalText(event) {
+      const extra = event?.overlay?.extendData;
+      if (extra && extra.text) document.getElementById("message").textContent = extra.text;
+      return true;
+    }
+
+    function sumDelta(candles, delta) {
+      return candles.map((candle, index) => {
+        let total = null;
+        for (const [exchange, series] of Object.entries(delta || {})) {
+          if (!state.ex[exchange]) continue;
+          const value = series[index];
+          if (value == null) continue;
+          total = (total || 0) + value;
+        }
+        return { ...candle, delta: total };
+      });
+    }
+
+    function placeSignals() {
+      chart.removeOverlay({ groupId: "signals" });
+      const signals = (state.payload && state.payload.signals) || [];
+      for (const signal of signals) {
+        if (!state.ex[String(signal.exchange || "").toLowerCase()]) continue;
+        const price = Number(signal.price);
+        if (!price) continue;
+        chart.createOverlay({
+          name: "signalDot",
+          groupId: "signals",
+          lock: true,
+          points: [{ timestamp: signal.timestamp, value: price * (1 + 0.012 * (signal.stack || 0)) }],
+          extendData: { code: signal.code, color: CODE_COLOR[signal.code] || "#ddd", text: signal.text },
+          onClick: showSignalText
+        });
+      }
+    }
+
+    function placeDrawings(items) {
+      chart.removeOverlay({ groupId: "user" });
+      state.drawings = [];
+      for (const item of items || []) {
+        const id = chart.createOverlay({
+          name: item.name,
+          groupId: "user",
+          points: item.points,
+          onRemoved: (event) => {
+            state.drawings = state.drawings.filter((row) => row.id !== event.overlay.id);
+            return false;
+          }
+        });
+        state.drawings.push({ id, name: item.name, points: item.points });
+      }
+    }
+
+    function redraw() {
+      if (!state.payload) return;
+      const keep = state.drawings.map((row) => ({ name: row.name, points: row.points }));
+      chart.applyNewData(sumDelta(state.payload.candles, state.payload.delta));
+      placeSignals();
+      if (keep.length) placeDrawings(keep);
+    }
+
+    async function loadChart() {
+      const coin = document.getElementById("coin").value;
+      if (!coin) return;
+      const response = await fetch(`/api/chart?coin=${encodeURIComponent(coin)}&tf=${state.tf}&hours=72`, { headers: headers() });
+      const body = await response.json();
+      if (!response.ok) {
+        document.getElementById("message").textContent = body.error || "Ошибка загрузки";
+        return;
+      }
+      state.payload = body;
+      redraw();
+      const drawings = await fetch(`/api/drawings?coin=${encodeURIComponent(coin)}&tf=${state.tf}`, { headers: headers() });
+      const stored = await drawings.json();
+      placeDrawings(stored.items || []);
+      document.getElementById("hint").textContent =
+        `Свечи ${body.source}. Линия — маркет-дельта выбранных бирж за свечу, пунктир — ноль. Точек: ${(body.signals || []).length}.`;
+    }
+
+    function armTool(name) {
+      state.tool = name;
+      if (!name) return;
+      chart.createOverlay({
+        name,
+        groupId: "user",
+        onDrawEnd: (event) => {
+          const overlay = event.overlay;
+          state.drawings.push({
+            id: overlay.id,
+            name: overlay.name,
+            points: (overlay.points || []).map((point) => ({ timestamp: point.timestamp, value: point.value }))
+          });
+          state.tool = "";
+          paintTools();
+          return false;
+        },
+        onRemoved: (event) => {
+          state.drawings = state.drawings.filter((row) => row.id !== event.overlay.id);
+          return false;
+        }
+      });
+    }
+
+    function paintTfs() {
+      buttonRow(document.getElementById("tfs"), TFS, state.tf, (value) => {
+        state.tf = value;
+        paintTfs();
+        loadChart();
+      });
+    }
+
+    function paintEx() {
+      const parent = document.getElementById("exs");
+      parent.innerHTML = "";
+      EXS.forEach((name) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = name;
+        btn.className = state.ex[name] ? "active" : "";
+        btn.onclick = () => {
+          state.ex[name] = !state.ex[name];
+          paintEx();
+          redraw();
+        };
+        parent.appendChild(btn);
+      });
+    }
+
+    function paintTools() {
+      buttonRow(document.getElementById("tools"), TOOLS, state.tool, (value) => {
+        state.tool = value;
+        paintTools();
+        armTool(value);
+      });
+    }
+
+    document.getElementById("save").onclick = async () => {
+      const coin = document.getElementById("coin").value;
+      const items = state.drawings.map((row) => ({ name: row.name, points: row.points }));
+      const response = await fetch(`/api/drawings?coin=${encodeURIComponent(coin)}&tf=${state.tf}`, {
+        method: "PUT",
+        headers: headers(),
+        body: JSON.stringify({ items })
+      });
+      document.getElementById("message").textContent = response.ok
+        ? `Рисунки сохранены: ${items.length}`
+        : "Не удалось сохранить рисунки";
+    };
+
+    document.getElementById("png").onclick = () => {
+      const url = chart.getConvertPictureUrl(true, "png", "#111111");
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `${document.getElementById("coin").value}-${state.tf}.png`;
+      link.click();
+    };
+
+    paintTfs();
+    paintEx();
+    paintTools();
+
+    fetch("/api/coins", { headers: headers() }).then((response) => response.json()).then((body) => {
+      const select = document.getElementById("coin");
+      for (const coin of body.coins || []) {
+        const option = document.createElement("option");
+        option.value = coin;
+        option.textContent = coin;
+        select.appendChild(option);
+      }
+      select.onchange = () => loadChart();
+      if (select.value) loadChart();
+    }).catch(() => {
+      document.getElementById("message").textContent = "Не удалось получить список монет. Проверьте CHART_TOKEN в адресе: /?token=...";
+    });
+  </script>
+</body>
+</html>
