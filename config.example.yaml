@@ -25,6 +25,8 @@ exchanges:
   - hyperliquid
   - aster
   - bingx
+  - gate
+  - mexc
 
 normalization:
   strip_prefixes:
@@ -69,7 +71,7 @@ signals:
     oi_percentile: 97
     oi_z: 3
   S2:
-    oi_deadzone_pct: 2
+    oi_deadzone_pct: 4
     price_deadzone_pct: 0.5
   S3:
     ratio_max: 0.5
@@ -81,7 +83,7 @@ signals:
     funding_short_max_8h: -0.05
   S5:
     lookback_hours: 24
-    oi_drop_1h_pct: -10
+    oi_drop_pct: -10
   S6:
     oi_volume_percentile: 95
   S7:
@@ -118,3 +120,22 @@ post_factum:
 
 monitoring:
   missing_data_intervals: 3
+
+confirmed_alerts:
+  pushover_cooldown_hours: 12
+
+# Спотовая кумулятивная дельта пишется в DELTA_DATABASE_URL
+# по токенам, добавленным в вотчлист. Aster в ccxt spot нет — не включается.
+cumulative_delta:
+  enabled: true
+  bucket_seconds: 60
+  flush_interval_sec: 5
+  sync_interval_sec: 30
+  exchanges:
+    - binance
+    - bybit
+    - bitget
+    - gate
+    - mexc
+    - bingx
+    - hyperliquid

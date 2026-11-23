@@ -21,7 +21,8 @@ if str(ROOT) not in sys.path:
 from app.bot.handlers import setup_bot_routes
 from app.config import ConfigStore
 from app.settings import get_settings
-from app.storage.db import create_engine, init_db, make_session_factory
+from app.delta.recorder import DeltaRecorder
+from app.storage.db import create_engine, init_db, init_delta_db, make_session_factory
 from app.storage import repo
 from app.workers.collector_loop import Pipeline
 from app.workers.config_watcher import ConfigWatcher
@@ -73,8 +74,45 @@ async def amain() -> None:
     setup_bot_routes(dp, session_factory, config_store, settings)
 
     pipeline = Pipeline(bot, session_factory, config_store)
+    confirmed_token = (settings.confirmed_bot_token or "").strip()
+    if confirmed_token:
+        pipeline.confirmed_bot = Bot(token=confirmed_token)
+        pipeline.confirmed_chat_ids = settings.confirmed_chat_id_list
+        logging.getLogger(__name__).info(
+            "Confirmed bot enabled, chats=%s", pipeline.confirmed_chat_ids
+        )
+        if not pipeline.confirmed_chat_ids:
+            logging.getLogger(__name__).warning(
+                "CONFIRMED_CHAT_IDS is empty: confirmed Telegram messages have no destination"
+            )
+    else:
+        logging.getLogger(__name__).warning(
+            "CONFIRMED_BOT_TOKEN is empty: confirmed channel is off"
+        )
     post_factum = PostFactumWorker(session_factory, config_store)
     watcher = ConfigWatcher(config_store, session_factory)
+
+    tasks = [
+        dp.start_polling(bot),
+        pipeline.start(),
+        post_factum.start(),
+        watcher.start(),
+    ]
+    delta_url = (settings.delta_database_url or "").strip()
+    if delta_url:
+        delta_engine = create_engine(delta_url)
+        await init_delta_db(delta_engine)
+        delta_factory = make_session_factory(delta_engine)
+        recorder = DeltaRecorder(session_factory, delta_factory, config_store)
+        pipeline.delta_factory = delta_factory
+        tasks.append(recorder.start())
+        logging.getLogger(__name__).info(
+            "Delta DB connected (%s)", delta_engine.url.render_as_string(hide_password=True)
+        )
+    else:
+        logging.getLogger(__name__).warning(
+            "DELTA_DATABASE_URL is empty: cumulative delta is not recorded"
+        )
 
     logging.getLogger(__name__).info(
         "Starting OI bot config_hash=%s mode=%s",
@@ -82,12 +120,7 @@ async def amain() -> None:
         config_store.config.monitoring_mode,
     )
 
-    await asyncio.gather(
-        dp.start_polling(bot),
-        pipeline.start(),
-        post_factum.start(),
-        watcher.start(),
-    )
+    await asyncio.gather(*tasks)
 
 
 def main() -> None:

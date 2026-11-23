@@ -8,7 +8,9 @@ from app.config import AppConfig, ConfigStore, config_hash
 from app.core.filters import apply_pre_filters, cooldown_allows
 from app.core.metrics import WindowMetrics, compute_window_metrics, robust_z
 from app.core.normalize import normalize_user_input, base_from_contract, parse_window_to_seconds
-from app.core.signals import evaluate_signals
+from app.core.signal_manager import format_signal_message
+from app.core.signals import FiredSignal, evaluate_signals, s2_regime
+from app.delta.confirm import spot_delta_confirm
 from app.storage.models import CooldownState, RawTick
 
 
@@ -65,6 +67,97 @@ def test_metrics_and_s1():
     fired = evaluate_signals({"4h": m, "1h": m, "24h": m}, cfg)
     codes = {f.code for f in fired}
     assert "S1" in codes or "S2" in codes
+
+
+def _metrics(**overrides) -> WindowMetrics:
+    base = dict(
+        window="15m",
+        oi_now=1_000_000,
+        oi_before=900_000,
+        oi_qty_now=10,
+        oi_qty_before=9,
+        oi_growth_pct=3.0,
+        oi_log_change=None,
+        oi_z=None,
+        oi_pctl=None,
+        price_now=1.1,
+        price_before=1.0,
+        price_change_pct=1.0,
+        price_z=None,
+        gap=None,
+        ratio=None,
+        funding_8h=0.0,
+        oi_to_volume=0.1,
+        long_pct=50,
+        short_pct=50,
+        long_pct_before=50,
+        short_pct_before=50,
+        volume_24h=20_000_000,
+        history_days=10,
+        new_history=False,
+    )
+    base.update(overrides)
+    return WindowMetrics(**base)
+
+
+def test_s2_oi_threshold_is_4pct():
+    cfg = AppConfig()
+    assert s2_regime(_metrics(oi_growth_pct=3.9, price_change_pct=1.0), cfg) is None
+    assert s2_regime(_metrics(oi_growth_pct=-4.0, price_change_pct=-1.0), cfg) is not None
+
+
+def test_s5_fires_on_each_window():
+    cfg = AppConfig()
+    m5 = _metrics(window="5m", oi_growth_pct=-12, price_change_pct=-1)
+    m1 = _metrics(window="1h", oi_growth_pct=-1, price_change_pct=-1)
+    fired = evaluate_signals({"5m": m5, "1h": m1}, cfg, had_s1_last_24h=True)
+    s5 = [f for f in fired if f.code == "S5"]
+    assert [f.window for f in s5] == ["5m"]
+    quiet = evaluate_signals({"5m": m5}, cfg, had_s1_last_24h=False)
+    assert all(f.code != "S5" for f in quiet)
+
+
+def test_confirmed_follows_spot_delta_sign():
+    buy = spot_delta_confirm({"binance": 1_500_000, "bybit": -200_000}, price_change_pct=1.2)
+    assert buy.confirmed is True
+    assert buy.leader_exchange == "binance"
+    assert buy.total_usd == 1_300_000
+    sell = spot_delta_confirm({"binance": 1_500_000, "bybit": -200_000}, price_change_pct=-0.4)
+    assert sell.confirmed is False
+    text = format_signal_message(
+        base="BTC",
+        exchange="binance",
+        window="15m",
+        fired=[FiredSignal("S2", "Режим OI + цена", "15m", {"regime": "OI ↑ + Price ↑ → Новые лонги"})],
+        metrics=_metrics(),
+        s7_status="local",
+        flags={},
+        ts=datetime.now(timezone.utc),
+        spot_delta=buy,
+    )
+    assert "confirmed" in text.splitlines()[-1]
+    assert "Binance" in text and "всего" in text
+    plain = format_signal_message(
+        base="BTC",
+        exchange="binance",
+        window="15m",
+        fired=[FiredSignal("S1", "Всплеск OI", "15m")],
+        metrics=_metrics(),
+        s7_status="confirmed",
+        flags={},
+        ts=datetime.now(timezone.utc),
+        spot_delta=None,
+    )
+    assert plain.splitlines()[-1] == "new"
+
+
+def test_confirmed_pushover_cooldown_12h():
+    from app.core.confirmed_notify import pushover_due
+
+    now = datetime.now(timezone.utc)
+    assert pushover_due(None, now, 12) is True
+    assert pushover_due(now - timedelta(hours=11, minutes=59), now, 12) is False
+    assert pushover_due(now - timedelta(hours=12), now, 12) is True
 
 
 def test_filters_f1():

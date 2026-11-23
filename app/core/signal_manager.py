@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from aiogram import Bot
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import AppConfig
+from app.core.confirmed_notify import deliver_confirmed
 from app.core.filters import cooldown_allows
 from app.core.metrics import WindowMetrics
 from app.core.signals import FiredSignal, SIGNAL_NAMES
+from app.delta.confirm import SpotDeltaConfirm
 from app.storage import repo
 from app.storage.db import with_db_retry
 from app.storage.write_lock import db_write_lock
@@ -73,6 +75,15 @@ def _fmt_ls(long_pct: float | None, short_pct: float | None) -> str:
     return f"{long_pct:.1f}/{short:.1f}"
 
 
+def _fmt_delta_line(confirm: SpotDeltaConfirm | None) -> str | None:
+    if confirm is None or confirm.leader_exchange is None or confirm.total_usd is None:
+        return None
+    return (
+        f"Delta     {confirm.leader_exchange.capitalize()} {_fmt_usd(confirm.leader_usd)}  "
+        f"·  всего {_fmt_usd(confirm.total_usd)}"
+    )
+
+
 def format_signal_message(
     *,
     base: str,
@@ -83,13 +94,14 @@ def format_signal_message(
     s7_status: str,
     flags: dict[str, Any],
     ts: datetime,
+    spot_delta: SpotDeltaConfirm | None = None,
 ) -> str:
     del flags, ts
     codes = sorted({f.code for f in fired})
     titles = " + ".join(codes)
     regime = next((f.details.get("regime") for f in fired if f.code == "S2"), None)
     names = " + ".join(f"{c} {SIGNAL_NAMES.get(c, '')}" for c in codes)
-    status = "confirmed" if s7_status == "confirmed" else "new"
+    status = "confirmed" if spot_delta is not None and spot_delta.confirmed else "new"
     ls_now = _fmt_ls(metrics.long_pct, metrics.short_pct)
     ls_before = _fmt_ls(metrics.long_pct_before, metrics.short_pct_before)
     lines = [
@@ -125,6 +137,9 @@ def format_signal_message(
         lines.append(f"OI/Vol    {metrics.oi_to_volume:.3f}")
     if regime:
         lines.append(regime)
+    delta_line = _fmt_delta_line(spot_delta)
+    if delta_line:
+        lines.append(delta_line)
     lines.append(status)
     return "\n".join(lines)
 
@@ -146,6 +161,10 @@ async def persist_and_notify(
     s7_status: str,
     flags: dict[str, Any],
     ts: datetime,
+    spot_delta: SpotDeltaConfirm | None = None,
+    confirmed_bot: Bot | None = None,
+    confirmed_chat_ids: list[int] | None = None,
+    coin: str | None = None,
 ) -> None:
     """Сохранение сигнала и рассылка."""
     if not fired:
@@ -161,19 +180,21 @@ async def persist_and_notify(
         },
         default=str,
     )
+    stored_status = "confirmed" if spot_delta is not None and spot_delta.confirmed else "local"
     text = format_signal_message(
         base=base,
         exchange=exchange,
         window=window,
         fired=fired,
         metrics=metrics,
-        s7_status=s7_status,
+        s7_status=stored_status,
         flags=flags,
         ts=ts,
+        spot_delta=spot_delta,
     )
     oi_growth = metrics.oi_growth_pct
 
-    async def _claim() -> list[tuple[int, int, list[str], str]]:
+    async def _claim() -> tuple[list[tuple[int, int, list[str], str]], bool]:
         async with db_write_lock():
             async with session_factory() as session:
                 sig = await repo.save_signal(
@@ -185,12 +206,12 @@ async def persist_and_notify(
                     types_json=json.dumps(codes),
                     payload_json=payload_json,
                     ts_utc=ts,
-                    s7_status=s7_status,
+                    s7_status=stored_status,
                     flags_json=json.dumps(flags),
                     price_at_signal=metrics.price_now,
                 )
                 if sig is None:
-                    return []
+                    return [], False
                 watchers = await repo.users_watching_on_exchange(session, base, exchange)
                 claims: list[tuple[int, int, list[str], str]] = []
                 for user, display in watchers:
@@ -208,9 +229,37 @@ async def persist_and_notify(
                     if not await repo.mark_delivery(session, user.id, sig.id):
                         continue
                     claims.append((user.telegram_id, user.id, allowed_codes, display))
-                return claims
+                return claims, True
 
-    claims = await with_db_retry(_claim, retries=12, delay=0.2)
+    claims, saved = await with_db_retry(_claim, retries=12, delay=0.2)
+    if saved and spot_delta is not None and spot_delta.confirmed:
+        from app.settings import get_settings
+
+        coin_name = (coin or base).upper()
+        confirmed_text = text if coin_name == base.upper() else format_signal_message(
+            base=coin_name,
+            exchange=exchange,
+            window=window,
+            fired=fired,
+            metrics=metrics,
+            s7_status=stored_status,
+            flags=flags,
+            ts=ts,
+            spot_delta=spot_delta,
+        )
+        try:
+            await deliver_confirmed(
+                bot=confirmed_bot,
+                chat_ids=list(confirmed_chat_ids or []),
+                settings=get_settings(),
+                session_factory=session_factory,
+                coin=coin_name,
+                text=confirmed_text,
+                cooldown_hours=cfg.confirmed_alerts.pushover_cooldown_hours,
+                now=datetime.now(timezone.utc),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error("confirmed channel %s: %s", coin_name, e)
     if not claims:
         return
 
@@ -226,6 +275,7 @@ async def persist_and_notify(
                 s7_status=s7_status,
                 flags=flags,
                 ts=ts,
+                spot_delta=spot_delta,
             )
         try:
             await bot.send_message(telegram_id, msg)

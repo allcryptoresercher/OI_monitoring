@@ -12,6 +12,7 @@ from sqlalchemy import event, inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.delta.models import DeltaBase
 from app.storage.models import Base
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,13 @@ def create_engine(database_url: str):
     else:
         logger.info("DB engine: PostgreSQL (%s)", database_url.split("@")[-1] if "@" in database_url else database_url)
     return engine
+
+
+async def init_delta_db(engine) -> None:
+    """Схема базы кумулятивной дельты. Таблицы сигналов OI сюда не попадают."""
+    async with engine.begin() as conn:
+        await conn.run_sync(DeltaBase.metadata.create_all)
+    logger.info("Delta DB schema ready (%s)", engine.url.render_as_string(hide_password=True))
 
 
 async def init_db(engine) -> None:

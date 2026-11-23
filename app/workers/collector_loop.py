@@ -33,10 +33,14 @@ class Pipeline:
         bot: Bot,
         session_factory: async_sessionmaker[AsyncSession],
         config_store: ConfigStore,
+        delta_factory: async_sessionmaker[AsyncSession] | None = None,
     ):
         self.bot = bot
         self.session_factory = session_factory
         self.config_store = config_store
+        self.delta_factory = delta_factory
+        self.confirmed_bot: Bot | None = None
+        self.confirmed_chat_ids: list[int] = []
         self._http: aiohttp.ClientSession | None = None
         self._running = False
         # recent S1 events for S7: base -> list[(ts, exchange)]
@@ -288,21 +292,15 @@ class Pipeline:
             if not pre.allow:
                 return
 
-            # S5 helpers
             since_s1 = utcnow() - timedelta(hours=cfg.signals.S5.lookback_hours)
             prior_s1 = await repo.recent_s1_signals(
                 session, snap.base_symbol, snap.exchange, since_s1
             )
-            oi_drop_1h = None
-            m1h = metrics_by_window.get("1h")
-            if m1h and m1h.oi_growth_pct is not None:
-                oi_drop_1h = m1h.oi_growth_pct
 
             fired = evaluate_signals(
                 metrics_by_window,
                 cfg,
                 had_s1_last_24h=bool(prior_s1),
-                oi_drop_1h_pct=oi_drop_1h,
             )
             if not fired:
                 return
@@ -353,10 +351,12 @@ class Pipeline:
             by_window: dict[str, list] = defaultdict(list)
             for f in fired:
                 by_window[f.window].append(f)
+            coins = _delta_coins(snap.base_symbol, group_key, alias_map)
             for window, flist in by_window.items():
                 m = metrics_by_window.get(window) or primary_m
+                spot = await self._spot_confirm(coins, window, m.price_change_pct, now_tick.ts_utc)
 
-                async def _notify(w=window, fl=flist, met=m):
+                async def _notify(w=window, fl=flist, met=m, spot_=spot):
                     await persist_and_notify(
                         bot=self.bot,
                         session_factory=self.session_factory,
@@ -369,6 +369,10 @@ class Pipeline:
                         s7_status=s7_status,
                         flags=flags,
                         ts=now_tick.ts_utc,
+                        spot_delta=spot_,
+                        confirmed_bot=self.confirmed_bot,
+                        confirmed_chat_ids=self.confirmed_chat_ids,
+                        coin=group_key,
                     )
 
                 try:
@@ -381,3 +385,30 @@ class Pipeline:
                         window,
                         e,
                     )
+
+    async def _spot_confirm(self, coins: set[str], window: str, price_change_pct: float | None, ts: datetime):
+        from app.delta.confirm import spot_delta_confirm
+        from app.delta.query import spot_delta_by_exchange
+
+        if self.delta_factory is None:
+            return None
+        end = ensure_utc(ts)
+        start = end - timedelta(seconds=parse_window_to_seconds(window))
+        try:
+            async with self.delta_factory() as session:
+                by_exchange = await spot_delta_by_exchange(session, coins, start, end)
+        except Exception:
+            logger.exception("spot delta lookup failed %s", sorted(coins))
+            return None
+        view = spot_delta_confirm(by_exchange, price_change_pct)
+        if view.leader_exchange is None:
+            return None
+        return view
+
+
+def _delta_coins(base: str, group_key: str, alias_map: dict[tuple[str, str], str]) -> set[str]:
+    coins = {base.upper(), group_key.upper()}
+    for (_exchange, local), display in alias_map.items():
+        if display.upper() == group_key.upper():
+            coins.add(local.upper())
+    return coins

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ class S1Cfg(BaseModel):
 
 
 class S2Cfg(BaseModel):
-    oi_deadzone_pct: float = 2
+    oi_deadzone_pct: float = 4
     price_deadzone_pct: float = 0.5
 
 
@@ -71,7 +71,15 @@ class S4Cfg(BaseModel):
 
 class S5Cfg(BaseModel):
     lookback_hours: int = 24
-    oi_drop_1h_pct: float = -10
+    oi_drop_pct: float = -10
+
+    @model_validator(mode="before")
+    @classmethod
+    def _legacy_drop_key(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "oi_drop_pct" not in data and "oi_drop_1h_pct" in data:
+            data = dict(data)
+            data["oi_drop_pct"] = data.pop("oi_drop_1h_pct")
+        return data
 
 
 class S6Cfg(BaseModel):
@@ -140,6 +148,32 @@ class MonitoringCfg(BaseModel):
     missing_data_intervals: int = 3
 
 
+class ConfirmedAlertsCfg(BaseModel):
+    """Второй бот: только confirmed. Pushover не чаще одного раза на монету за окно."""
+
+    pushover_cooldown_hours: float = 12
+
+
+class CumulativeDeltaCfg(BaseModel):
+    """Запись спотовой кумулятивной дельты (логика бакетов как в spot_parser)."""
+
+    enabled: bool = True
+    bucket_seconds: int = 60
+    flush_interval_sec: float = 5
+    sync_interval_sec: float = 30
+    exchanges: list[str] = Field(
+        default_factory=lambda: [
+            "binance",
+            "bybit",
+            "bitget",
+            "gate",
+            "mexc",
+            "bingx",
+            "hyperliquid",
+        ]
+    )
+
+
 class AppConfig(BaseModel):
     collector: CollectorCfg = Field(default_factory=CollectorCfg)
     windows: list[str] = Field(default_factory=lambda: ["5m", "15m", "1h", "4h", "24h"])
@@ -154,6 +188,8 @@ class AppConfig(BaseModel):
     filters: FiltersCfg = Field(default_factory=FiltersCfg)
     post_factum: PostFactumCfg = Field(default_factory=PostFactumCfg)
     monitoring: MonitoringCfg = Field(default_factory=MonitoringCfg)
+    cumulative_delta: CumulativeDeltaCfg = Field(default_factory=CumulativeDeltaCfg)
+    confirmed_alerts: ConfirmedAlertsCfg = Field(default_factory=ConfirmedAlertsCfg)
 
     @field_validator("windows")
     @classmethod

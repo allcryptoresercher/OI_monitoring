@@ -43,6 +43,8 @@ KNOWN_EXCHANGES = {
     "hyperliquid",
     "aster",
     "bingx",
+    "gate",
+    "mexc",
     "hl",
 }
 
@@ -383,7 +385,7 @@ def setup_bot_routes(
         ex = _normalize_exchange(parts[0])
         if not ex:
             await message.answer(
-                "Неизвестная биржа. Доступны: binance, bybit, bitget, aster, bingx, hyperliquid"
+                "Неизвестная биржа. Доступны: binance, bybit, bitget, aster, bingx, gate, mexc, hyperliquid"
             )
             return False
         base = normalize_user_input(parts[1], cfg.normalization)

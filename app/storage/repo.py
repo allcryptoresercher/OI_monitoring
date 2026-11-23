@@ -7,10 +7,12 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.storage.models import (
     CooldownState,
     ConfigMeta,
+    ConfirmedPushover,
     ExchangeHealth,
     Instrument,
     PriceAlert,
@@ -289,6 +291,38 @@ async def list_watchlist_entries(
         .order_by(WatchlistItem.base_symbol)
     )
     return [(row[0], row[1]) for row in result.all()]
+
+
+async def watchlist_cd_targets(
+    session: AsyncSession, exchanges: list[str]
+) -> set[tuple[str, str]]:
+    """Пары (биржа, тикер) для записи кумулятивной дельты.
+
+    Тикер без привязок пишется на всех биржах из списка.
+    Тикер с привязками — только на указанных биржах и под локальным именем.
+    Если хотя бы один пользователь добавил тикер без привязок, берутся все биржи.
+    """
+    allowed = {e.strip().lower() for e in exchanges if e.strip()}
+    result = await session.execute(
+        select(WatchlistItem).options(selectinload(WatchlistItem.bindings))
+    )
+    items = list(result.scalars().unique().all())
+    unbound: set[str] = set()
+    bound: set[tuple[str, str]] = set()
+    for item in items:
+        coin = item.base_symbol.upper()
+        if not item.bindings:
+            unbound.add(coin)
+            continue
+        for binding in item.bindings:
+            ex = binding.exchange.lower()
+            if ex in allowed:
+                bound.add((ex, binding.base_symbol.upper()))
+    targets = set(bound)
+    for coin in unbound:
+        for ex in allowed:
+            targets.add((ex, coin))
+    return targets
 
 
 async def union_watchlist_symbols(session: AsyncSession) -> list[str]:
@@ -577,6 +611,21 @@ async def mark_delivery(session: AsyncSession, user_id: int, signal_id: int) -> 
     return True
 
 
+async def last_confirmed_pushover(session: AsyncSession, coin: str) -> datetime | None:
+    row = await session.get(ConfirmedPushover, coin.upper())
+    return row.last_sent_at if row else None
+
+
+async def mark_confirmed_pushover(session: AsyncSession, coin: str, sent_at: datetime) -> None:
+    coin = coin.upper()
+    row = await session.get(ConfirmedPushover, coin)
+    if row is None:
+        session.add(ConfirmedPushover(coin=coin, last_sent_at=sent_at))
+    else:
+        row.last_sent_at = sent_at
+    await session.commit()
+
+
 async def get_cooldown(
     session: AsyncSession, user_id: int, exchange: str, base: str, signal_type: str
 ) -> CooldownState | None:
@@ -712,19 +761,30 @@ async def purge_old_ticks(session: AsyncSession, keep_days: int = 30) -> int:
 
 async def aggregate_oi_ath_atl(
     session: AsyncSession, legs: list[tuple[str, str]]
-) -> tuple[float | None, float | None]:
-    """Мин/макс суммы OI$ по ногам (приближённо по уникальным timestamp'ам)."""
+) -> tuple[tuple[float, float | None, datetime] | None, tuple[float, float | None, datetime] | None]:
+    """Мин/макс суммы OI за 30 дней.
+
+    В минуту попадают только снимки, где есть все переданные биржи.
+    Возвращает (high, low) как (usd, qty, ts) либо None.
+    """
     if not legs:
         return None, None
-    # Берём последние ~14 дней тиков по каждой ноге и суммируем по минутному бакету
-    since = datetime.now(timezone.utc) - timedelta(days=30)
     from collections import defaultdict
 
-    bucket: dict[int, float] = defaultdict(float)
+    required = {ex.lower() for ex, _ in legs}
+    since = datetime.now(timezone.utc) - timedelta(days=30)
+    # minute -> exchange -> (usd, qty)
+    bucket: dict[int, dict[str, tuple[float, float | None]]] = defaultdict(dict)
     for exchange, base in legs:
         rows = (
             await session.execute(
-                select(RawTick.ts_utc, RawTick.oi_usd).where(
+                select(
+                    RawTick.ts_utc,
+                    RawTick.oi_usd,
+                    RawTick.oi_qty,
+                    RawTick.mark_price,
+                    RawTick.last_price,
+                ).where(
                     RawTick.exchange == exchange,
                     RawTick.base_symbol == base,
                     RawTick.ts_utc >= since,
@@ -732,17 +792,30 @@ async def aggregate_oi_ath_atl(
                 )
             )
         ).all()
-        for ts, oi in rows:
+        for ts, oi, qty, mark, last in rows:
             if oi is None:
                 continue
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
+            px = mark if mark else last
+            q = float(qty) if qty else (float(oi) / float(px) if px else None)
             key = int(ts.timestamp()) // 60
-            bucket[key] += float(oi)
-    if not bucket:
-        return None, None
-    vals = list(bucket.values())
-    return max(vals), min(vals)
+            bucket[key][exchange.lower()] = (float(oi), q)
+    best_high: tuple[float, float | None, datetime] | None = None
+    best_low: tuple[float, float | None, datetime] | None = None
+    for key, by_ex in bucket.items():
+        if not required.issubset(by_ex):
+            continue
+        usd = sum(v[0] for v in by_ex.values())
+        qtys = [v[1] for v in by_ex.values()]
+        qty = sum(qtys) if all(q is not None for q in qtys) else None
+        ts = datetime.fromtimestamp(key * 60, tz=timezone.utc)
+        point = (usd, qty, ts)
+        if best_high is None or usd > best_high[0]:
+            best_high = point
+        if best_low is None or usd < best_low[0]:
+            best_low = point
+    return best_high, best_low
 
 
 async def create_price_alert(

@@ -55,6 +55,7 @@ def evaluate_signals(
     had_s1_last_24h: bool = False,
     oi_drop_1h_pct: float | None = None,
 ) -> list[FiredSignal]:
+    del oi_drop_1h_pct  # порог берётся из метрик каждого окна
     fired: list[FiredSignal] = []
     s1_cfg = cfg.signals.S1
     s1_hit_windows: list[str] = []
@@ -130,6 +131,27 @@ def evaluate_signals(
                     )
                 )
 
+        # S5 — на каждом окне: был S1 за lookback, OI упал, цена упала
+        s5 = cfg.signals.S5
+        if (
+            had_s1_last_24h
+            and m.oi_growth_pct is not None
+            and m.price_change_pct is not None
+            and m.oi_growth_pct <= s5.oi_drop_pct
+            and m.price_change_pct < 0
+        ):
+            fired.append(
+                FiredSignal(
+                    "S5",
+                    SIGNAL_NAMES["S5"],
+                    window,
+                    {
+                        "oi_drop_pct": m.oi_growth_pct,
+                        "price_change_pct": m.price_change_pct,
+                    },
+                )
+            )
+
         # S6
         s6 = cfg.signals.S6
         if m.oi_volume_pctl is not None and m.oi_volume_pctl >= s6.oi_volume_percentile:
@@ -139,22 +161,6 @@ def evaluate_signals(
                     SIGNAL_NAMES["S6"],
                     window,
                     {"oi_to_volume": m.oi_to_volume, "oi_volume_pctl": m.oi_volume_pctl},
-                )
-            )
-
-    # S5 — once if conditions met (use 1h metrics)
-    s5 = cfg.signals.S5
-    m1h = metrics_by_window.get("1h")
-    if had_s1_last_24h and oi_drop_1h_pct is not None and m1h is not None:
-        if oi_drop_1h_pct <= s5.oi_drop_1h_pct and (
-            m1h.price_change_pct is not None and m1h.price_change_pct < 0
-        ):
-            fired.append(
-                FiredSignal(
-                    "S5",
-                    SIGNAL_NAMES["S5"],
-                    "1h",
-                    {"oi_drop_1h_pct": oi_drop_1h_pct, "price_change_pct": m1h.price_change_pct},
                 )
             )
 

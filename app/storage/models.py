@@ -179,6 +179,15 @@ class PriceAlert(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class ConfirmedPushover(Base):
+    """Последний Pushover по монете для confirmed-бота."""
+
+    __tablename__ = "confirmed_pushover"
+
+    coin: Mapped[str] = mapped_column(String(64), primary_key=True)
+    last_sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class ConfigMeta(Base):
     __tablename__ = "config_meta"
 

@@ -22,6 +22,29 @@ logger = logging.getLogger(__name__)
 
 TZ_UTC7 = timezone(timedelta(hours=7))
 
+EXCHANGE_LABELS = {
+    "binance": "Binance",
+    "bybit": "Bybit",
+    "bitget": "Bitget",
+    "hyperliquid": "Hyperliquid",
+    "aster": "Aster",
+    "bingx": "BingX",
+    "gate": "Gate",
+    "mexc": "Mexc",
+}
+
+
+def exchange_label(name: str) -> str:
+    return EXCHANGE_LABELS.get(name.lower(), name.capitalize())
+
+
+def format_dt_utc7(dt: datetime | None) -> str:
+    if dt is None:
+        return "—"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(TZ_UTC7).strftime("%d.%m %H:%M")
+
 REPORT_WINDOWS = ["5m", "15m", "1h", "4h", "1d", "1w"]
 
 
@@ -269,21 +292,33 @@ async def build_otchet_report(
     if not live_legs:
         return f"{display}\n\nНет свежих тиков по тикеру."
 
-    # ATH/ATL суммарного OI$ по истории (сэмпл по timestamp buckets)
     ath, atl = await repo.aggregate_oi_ath_atl(
         session, [(ex, base) for ex, base, _ in live_legs]
     )
+    added_at = None
+    if user_id is not None:
+        item = await repo.get_watchlist_item(session, user_id, display)
+        if item is not None:
+            added_at = item.created_at
 
-    lines = [display, ""]
-    if atl is not None:
-        lines.append(f"OI_aggr_all_time_low   {format_usd_short(atl)}")
-    if ath is not None:
-        lines.append(f"OI_aggr_all_time_high  {format_usd_short(ath)}")
+    lines = [display, format_dt_utc7(added_at), ""]
+
+    def _extreme(label: str, point) -> None:
+        if point is None:
+            return
+        usd, qty, ts = point
+        lines.append(
+            f"{label}  {_qt_qs(qty, usd)}  {format_dt_utc7(ts)}"
+        )
+
+    _extreme("OI_aggr_all_time_low ", atl)
+    _extreme("OI_aggr_all_time_high", ath)
     if ath is not None or atl is not None:
         lines.append("")
 
     # —— now: текущие QT/Q$, без % изменения ——
     lines.append(_row("now", "QT/Q$", "ОИ", "Price", "L/S", "Voll"))
+    now_rows = []
     for exchange, _base, tick_now in live_legs:
         qty = oi_tokens(tick_now)
         usd = tick_now.oi_usd
@@ -292,9 +327,12 @@ async def build_otchet_report(
             100.0 - long_pct if long_pct is not None else None
         )
         vol = tick_now.volume_24h
+        now_rows.append((usd or 0.0, exchange, qty, usd, long_pct, short_pct, vol))
+    now_rows.sort(key=lambda r: r[0], reverse=True)
+    for _usd, exchange, qty, usd, long_pct, short_pct, vol in now_rows:
         lines.append(
             _row(
-                exchange.capitalize(),
+                exchange_label(exchange),
                 _qt_qs(qty, usd),
                 "—",
                 "—",
@@ -355,17 +393,17 @@ async def build_otchet_report(
             if pn is not None and pb and pb > 0:
                 price_chg = (pn / pb - 1.0) * 100.0
                 price_chgs.append(price_chg)
-            long_pct = tick_now.long_pct
-            short_pct = tick_now.short_pct if tick_now.short_pct is not None else (
+            long_pct = before.long_pct
+            short_pct = before.short_pct if before.short_pct is not None else (
                 100.0 - long_pct if long_pct is not None else None
             )
             if long_pct is not None and short_pct is not None:
                 ls_longs.append(long_pct)
                 ls_shorts.append(short_pct)
-            vol = tick_now.volume_24h
+            vol = before.volume_24h
             per_ex.append(
                 (
-                    exchange.capitalize(),
+                    exchange_label(exchange),
                     q_before,
                     usd_before,
                     oi_chg,
@@ -416,6 +454,7 @@ async def build_otchet_report(
                 format_usd_short(vol_sum if vol_sum else None),
             )
         )
+        per_ex.sort(key=lambda r: r[2] or 0.0, reverse=True)
         for name, q_ago, usd_ago, oi_chg, price_chg, long_pct, short_pct, vol in per_ex:
             lines.append(
                 _row(

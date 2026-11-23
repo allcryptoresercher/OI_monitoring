@@ -17,16 +17,28 @@ class Settings(BaseSettings):
         default="postgresql+asyncpg://oi_bot:oi_bot@127.0.0.1:5432/oi_bot",
         alias="DATABASE_URL",
     )
+    delta_database_url: str = Field(
+        default="",
+        alias="DELTA_DATABASE_URL",
+    )
     config_path: str = Field(default="./config.yaml", alias="CONFIG_PATH")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     pushover_token: str = Field(default="", alias="PUSHOVER_TOKEN")
     pushover_user: str = Field(default="", alias="PUSHOVER_USER")
+    confirmed_bot_token: str = Field(default="", alias="CONFIRMED_BOT_TOKEN")
+    confirmed_chat_ids: str = Field(default="", alias="CONFIRMED_CHAT_IDS")
 
     @property
     def admin_id_set(self) -> set[int]:
         if not self.admin_ids.strip():
             return set()
         return {int(x.strip()) for x in self.admin_ids.split(",") if x.strip()}
+
+    @property
+    def confirmed_chat_id_list(self) -> list[int]:
+        if not self.confirmed_chat_ids.strip():
+            return []
+        return [int(x.strip()) for x in self.confirmed_chat_ids.split(",") if x.strip()]
 
 
 @lru_cache
