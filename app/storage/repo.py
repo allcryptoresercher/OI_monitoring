@@ -284,11 +284,11 @@ async def list_watchlist(session: AsyncSession, user_id: int) -> list[str]:
 async def list_watchlist_entries(
     session: AsyncSession, user_id: int
 ) -> list[tuple[str, datetime | None]]:
-    """[(base_symbol, created_at), ...] по алфавиту тикера."""
+    """[(base_symbol, created_at), ...] от самого раннего добавления к позднему."""
     result = await session.execute(
         select(WatchlistItem.base_symbol, WatchlistItem.created_at)
         .where(WatchlistItem.user_id == user_id)
-        .order_by(WatchlistItem.base_symbol)
+        .order_by(WatchlistItem.created_at.asc(), WatchlistItem.base_symbol)
     )
     return [(row[0], row[1]) for row in result.all()]
 

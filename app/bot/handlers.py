@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
@@ -23,8 +24,10 @@ from app.bot.market_info import (
     build_otchet_report,
     check_add_keyboard,
     format_check_report,
+    format_checkall_report,
     format_list_report,
     lookup_base_on_exchanges,
+    lookup_spot_markets,
 )
 from app.config import ConfigStore
 from app.core.normalize import normalize_user_input
@@ -51,6 +54,7 @@ KNOWN_EXCHANGES = {
 
 class Form(StatesGroup):
     waiting_check = State()
+    waiting_checkall = State()
     waiting_add = State()
     waiting_otchet = State()
     waiting_alert = State()
@@ -120,7 +124,8 @@ def setup_bot_routes(
         await message.answer(
             "OI Monitor бот запущен.\n\n"
             "Команды:\n"
-            "/check — проверить тикер (биржи, OI, L/S)\n"
+            "/check — проверить фьючерсный тикер (OI, L/S)\n"
+            "/checkall — спот и фьючерсы по тикеру\n"
             "/add — добавить пары биржа+тикер (разные имена)\n"
             "/otchet — сводка OI/цены по таймфреймам\n"
             "/alert — ценовой алерт (биржа тикер цена)\n"
@@ -163,6 +168,38 @@ def setup_bot_routes(
             )
         except Exception as e:  # noqa: BLE001
             logger.exception("check failed")
+            await message.answer(f"Ошибка запроса: {e}")
+        await state.clear()
+
+    @router.message(Command("checkall"))
+    async def cmd_checkall(message: Message, state: FSMContext) -> None:
+        await state.set_state(Form.waiting_checkall)
+        await message.answer("Введите тикер")
+
+    @router.message(Form.waiting_checkall, F.text)
+    async def on_checkall_ticker(message: Message, state: FSMContext) -> None:
+        text = (message.text or "").strip()
+        if text.startswith("/"):
+            await state.clear()
+            await message.answer("Ожидание тикера сброшено. Выберите команду заново.")
+            return
+        cfg = config_store.config
+        base = normalize_user_input(text, cfg.normalization)
+        if not base:
+            await message.answer("Некорректный тикер. Введите ещё раз или /start")
+            return
+        await message.answer(f"Ищу спот и фьючерсы {base}…")
+        try:
+            spot_rows, fut_rows = await asyncio.gather(
+                lookup_spot_markets(base),
+                lookup_base_on_exchanges(base, cfg),
+            )
+            await message.answer(
+                f"<pre>{format_checkall_report(base, spot_rows, fut_rows)}</pre>",
+                parse_mode="HTML",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("checkall failed")
             await message.answer(f"Ошибка запроса: {e}")
         await state.clear()
 

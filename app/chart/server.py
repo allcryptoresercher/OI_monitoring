@@ -70,7 +70,10 @@ async def _chart(request: web.Request) -> web.Response:
 
     candles, source = await fetch_klines(coin, tf, hours)
     if not candles:
-        return web.json_response({"error": f"нет спотовых свечей {coin}USDT на Binance и Bybit"}, status=404)
+        return web.json_response(
+            {"error": f"нет свечей {coin}USDT: ни фьючерсы, ни спот Binance и Bybit"},
+            status=404,
+        )
 
     start, end = chart_window(hours)
     async with request.app["oi_factory"]() as session:

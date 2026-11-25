@@ -50,15 +50,39 @@ async def coin_names(session: AsyncSession, coin: str) -> set[str]:
 
 
 async def fetch_klines(coin: str, tf: str, hours: int) -> tuple[list[dict], str]:
+    """Сначала USDT-фьючерсы Binance и Bybit, затем спот тех же бирж."""
     limit = min(1000, max(20, int(hours * 3_600_000 / TF_MS[tf]) + 2))
     timeout = aiohttp.ClientTimeout(total=20)
     async with aiohttp.ClientSession(timeout=timeout) as http:
-        candles = await _binance_klines(http, coin, tf, limit)
-        source = "binance"
-        if not candles:
-            candles = await _bybit_klines(http, coin, tf, limit)
-            source = "bybit"
-    return candles, source if candles else ""
+        for source, loader in (
+            ("Binance futures", _binance_futures_klines),
+            ("Bybit futures", _bybit_linear_klines),
+            ("Binance spot", _binance_klines),
+            ("Bybit spot", _bybit_klines),
+        ):
+            candles = await loader(http, coin, tf, limit)
+            if candles:
+                return candles, source
+    return [], ""
+
+
+async def _binance_futures_klines(http: aiohttp.ClientSession, coin: str, tf: str, limit: int) -> list[dict]:
+    url = "https://fapi.binance.com/fapi/v1/klines"
+    try:
+        async with http.get(url, params={"symbol": f"{coin}USDT", "interval": BINANCE_INTERVAL[tf], "limit": limit}) as resp:
+            if resp.status != 200:
+                return []
+            rows = await resp.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("binance futures klines %s: %s", coin, exc)
+        return []
+    if not isinstance(rows, list) or not rows:
+        return []
+    return [_kline(int(row[0]), row[1], row[2], row[3], row[4], row[5]) for row in rows]
+
+
+async def _bybit_linear_klines(http: aiohttp.ClientSession, coin: str, tf: str, limit: int) -> list[dict]:
+    return await _bybit_klines(http, coin, tf, limit, category="linear")
 
 
 async def _binance_klines(http: aiohttp.ClientSession, coin: str, tf: str, limit: int) -> list[dict]:
@@ -71,15 +95,19 @@ async def _binance_klines(http: aiohttp.ClientSession, coin: str, tf: str, limit
     except Exception as exc:  # noqa: BLE001
         logger.warning("binance klines %s: %s", coin, exc)
         return []
+    if not isinstance(rows, list) or not rows:
+        return []
     return [_kline(int(row[0]), row[1], row[2], row[3], row[4], row[5]) for row in rows]
 
 
-async def _bybit_klines(http: aiohttp.ClientSession, coin: str, tf: str, limit: int) -> list[dict]:
+async def _bybit_klines(
+    http: aiohttp.ClientSession, coin: str, tf: str, limit: int, category: str = "spot"
+) -> list[dict]:
     url = "https://api.bybit.com/v5/market/kline"
     try:
         async with http.get(
             url,
-            params={"category": "spot", "symbol": f"{coin}USDT", "interval": BYBIT_INTERVAL[tf], "limit": limit},
+            params={"category": category, "symbol": f"{coin}USDT", "interval": BYBIT_INTERVAL[tf], "limit": limit},
         ) as resp:
             if resp.status != 200:
                 return []
@@ -156,6 +184,7 @@ async def load_signals(
                     "price": price,
                     "code": code,
                     "exchange": row.exchange,
+                    "window": row.window,
                     "stack": stack,
                     "text": text,
                 }

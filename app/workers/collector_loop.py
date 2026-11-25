@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.collectors import build_collectors
 from app.config import AppConfig, ConfigStore
 from app.core.filters import apply_f8_flags, apply_pre_filters
-from app.core.metrics import compute_window_metrics, history_cutoff
+from app.core.metrics import compute_window_metrics, history_cutoff, window_history_ok
 from app.core.normalize import parse_window_to_seconds
 from app.core.signal_manager import persist_and_notify
 from app.core.signals import evaluate_signals
@@ -259,6 +259,8 @@ class Pipeline:
                 )
                 if before:
                     before.ts_utc = ensure_utc(before.ts_utc)
+                if not window_history_ok(now_tick.ts_utc, before.ts_utc if before else None, sec):
+                    before = None
                 metrics_by_window[window] = compute_window_metrics(
                     now_tick, before, history, window, cfg, snap.exchange
                 )
@@ -396,9 +398,12 @@ class Pipeline:
         start = end - timedelta(seconds=parse_window_to_seconds(window))
         try:
             async with self.delta_factory() as session:
-                by_exchange = await spot_delta_by_exchange(session, coins, start, end)
+                by_exchange, covered_sec = await spot_delta_by_exchange(session, coins, start, end)
         except Exception:
             logger.exception("spot delta lookup failed %s", sorted(coins))
+            return None
+        window_sec = parse_window_to_seconds(window)
+        if covered_sec < window_sec * 0.7:
             return None
         view = spot_delta_confirm(by_exchange, price_change_pct)
         if view.leader_exchange is None:

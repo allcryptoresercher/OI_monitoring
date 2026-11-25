@@ -61,7 +61,8 @@ async def amain() -> None:
     bot = Bot(token=settings.bot_token)
     await bot.set_my_commands(
         [
-            BotCommand(command="check", description="Проверить тикер (OI, L/S)"),
+            BotCommand(command="check", description="Проверить фьючерсный тикер (OI, L/S)"),
+            BotCommand(command="checkall", description="Спот и фьючерсы по тикеру"),
             BotCommand(command="add", description="Добавить пары биржа+тикер"),
             BotCommand(command="otchet", description="Сводка по таймфреймам"),
             BotCommand(command="alert", description="Создать ценовой алерт"),

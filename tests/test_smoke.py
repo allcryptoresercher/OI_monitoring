@@ -160,6 +160,49 @@ def test_confirmed_pushover_cooldown_12h():
     assert pushover_due(now - timedelta(hours=12), now, 12) is True
 
 
+def test_window_needs_full_span():
+    from app.core.metrics import window_history_ok
+
+    now = datetime.now(timezone.utc)
+    hour = 3600
+    assert window_history_ok(now, now - timedelta(seconds=hour), hour) is True
+    assert window_history_ok(now, now - timedelta(minutes=10), hour) is False
+    assert window_history_ok(now, now - timedelta(hours=6), hour) is False
+
+
+def test_check_report_sorts_by_oi_and_shows_funding():
+    from app.bot.market_info import ExchangeOiRow, format_check_report
+
+    rows = [
+        ExchangeOiRow("bybit", True, 1_000_000, 2.0, funding_rate=0.0001),
+        ExchangeOiRow("binance", True, 9_000_000, 2.1, funding_rate=-0.0002),
+    ]
+    text = format_check_report("BTC", rows)
+    assert text.index("Binance") < text.index("Bybit")
+    assert "F" in text.splitlines()[2]
+    assert "+0.010%" in text or "-0.020%" in text
+
+
+def test_checkall_splits_spot_and_futures():
+    from app.bot.market_info import ExchangeOiRow, SpotMarketRow, format_checkall_report
+
+    text = format_checkall_report(
+        "ARIA",
+        [
+            SpotMarketRow("binance", False),
+            SpotMarketRow("bybit", True, price=1.2, volume_usd=50_000),
+        ],
+        [
+            ExchangeOiRow("binance", False, None),
+            ExchangeOiRow("bybit", True, 2_000_000, 1.25, funding_rate=0.0001),
+        ],
+    )
+    assert text.index("Спотовый рынок") < text.index("Фьючерсный рынок")
+    assert "нет спота: Binance" in text
+    assert "Bybit" in text.split("Фьючерсный рынок")[1]
+    assert "+0.010%" in text
+
+
 def test_filters_f1():
     cfg = AppConfig()
     m = WindowMetrics(

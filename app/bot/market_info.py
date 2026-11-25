@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.collectors import build_collectors
 from app.config import AppConfig
-from app.core.metrics import oi_tokens
+from app.core.metrics import funding_to_8h, oi_tokens
 from app.core.normalize import parse_window_to_seconds
 from app.core.timeutils import ensure_utc, utcnow
 from app.storage import repo
@@ -56,6 +56,7 @@ class ExchangeOiRow:
     price: float | None = None
     long_pct: float | None = None
     short_pct: float | None = None
+    funding_rate: float | None = None
     contract_symbol: str | None = None
     error: str | None = None
 
@@ -110,6 +111,13 @@ def format_price(v: float | None) -> str:
     return f"{v:.6g}"
 
 
+def format_funding(rate: float | None, exchange: str) -> str:
+    value = funding_to_8h(rate, exchange)
+    if value is None:
+        return "—"
+    return f"{value:+.3f}%"
+
+
 def format_ls(long_pct: float | None, short_pct: float | None) -> str:
     if long_pct is None:
         return "—"
@@ -159,6 +167,7 @@ async def lookup_base_on_exchanges(base: str, cfg: AppConfig) -> list[ExchangeOi
                         price=price,
                         long_pct=best.long_pct,
                         short_pct=best.short_pct,
+                        funding_rate=best.funding_rate,
                         contract_symbol=best.contract_symbol,
                     )
                 except Exception as e:  # noqa: BLE001
@@ -183,6 +192,215 @@ async def lookup_base_on_exchanges(base: str, cfg: AppConfig) -> list[ExchangeOi
     return rows
 
 
+@dataclass
+class SpotMarketRow:
+    exchange: str
+    available: bool
+    price: float | None = None
+    volume_usd: float | None = None
+    symbol: str | None = None
+
+
+def _as_float(value) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+async def lookup_spot_markets(base: str) -> list[SpotMarketRow]:
+    """USDT-спот на биржах, где есть публичный тикер. Нет пары — available=False."""
+    base = base.upper()
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout) as http:
+        results = await asyncio.gather(
+            _spot_binance(http, base),
+            _spot_bybit(http, base),
+            _spot_bitget(http, base),
+            _spot_gate(http, base),
+            _spot_mexc(http, base),
+            _spot_bingx(http, base),
+        )
+    return list(results)
+
+
+async def _spot_binance(http: aiohttp.ClientSession, base: str) -> SpotMarketRow:
+    symbol = f"{base}USDT"
+    try:
+        async with http.get("https://api.binance.com/api/v3/ticker/24hr", params={"symbol": symbol}) as resp:
+            if resp.status != 200:
+                return SpotMarketRow("binance", False, symbol=symbol)
+            data = await resp.json()
+        return SpotMarketRow(
+            "binance",
+            True,
+            price=_as_float(data.get("lastPrice")),
+            volume_usd=_as_float(data.get("quoteVolume")),
+            symbol=symbol,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("spot binance %s: %s", base, exc)
+        return SpotMarketRow("binance", False, symbol=symbol)
+
+
+async def _spot_bybit(http: aiohttp.ClientSession, base: str) -> SpotMarketRow:
+    symbol = f"{base}USDT"
+    try:
+        async with http.get(
+            "https://api.bybit.com/v5/market/tickers",
+            params={"category": "spot", "symbol": symbol},
+        ) as resp:
+            body = await resp.json()
+        items = ((body.get("result") or {}).get("list") or []) if resp.status == 200 else []
+        if not items:
+            return SpotMarketRow("bybit", False, symbol=symbol)
+        row = items[0]
+        return SpotMarketRow(
+            "bybit",
+            True,
+            price=_as_float(row.get("lastPrice")),
+            volume_usd=_as_float(row.get("turnover24h")),
+            symbol=symbol,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("spot bybit %s: %s", base, exc)
+        return SpotMarketRow("bybit", False, symbol=symbol)
+
+
+async def _spot_bitget(http: aiohttp.ClientSession, base: str) -> SpotMarketRow:
+    symbol = f"{base}USDT"
+    try:
+        async with http.get(
+            "https://api.bitget.com/api/v2/spot/market/tickers",
+            params={"symbol": symbol},
+        ) as resp:
+            body = await resp.json()
+        data = body.get("data") or []
+        if resp.status != 200 or body.get("code") not in (None, "00000") or not data:
+            return SpotMarketRow("bitget", False, symbol=symbol)
+        row = data[0]
+        return SpotMarketRow(
+            "bitget",
+            True,
+            price=_as_float(row.get("lastPr")),
+            volume_usd=_as_float(row.get("quoteVolume") or row.get("usdtVolume")),
+            symbol=symbol,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("spot bitget %s: %s", base, exc)
+        return SpotMarketRow("bitget", False, symbol=symbol)
+
+
+async def _spot_gate(http: aiohttp.ClientSession, base: str) -> SpotMarketRow:
+    symbol = f"{base}_USDT"
+    try:
+        async with http.get(
+            "https://api.gateio.ws/api/v4/spot/tickers",
+            params={"currency_pair": symbol},
+        ) as resp:
+            if resp.status != 200:
+                return SpotMarketRow("gate", False, symbol=symbol)
+            data = await resp.json()
+        if not isinstance(data, list) or not data:
+            return SpotMarketRow("gate", False, symbol=symbol)
+        row = data[0]
+        return SpotMarketRow(
+            "gate",
+            True,
+            price=_as_float(row.get("last")),
+            volume_usd=_as_float(row.get("quote_volume")),
+            symbol=symbol,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("spot gate %s: %s", base, exc)
+        return SpotMarketRow("gate", False, symbol=symbol)
+
+
+async def _spot_mexc(http: aiohttp.ClientSession, base: str) -> SpotMarketRow:
+    symbol = f"{base}USDT"
+    try:
+        async with http.get("https://api.mexc.com/api/v3/ticker/24hr", params={"symbol": symbol}) as resp:
+            if resp.status != 200:
+                return SpotMarketRow("mexc", False, symbol=symbol)
+            data = await resp.json()
+        if not isinstance(data, dict) or not data.get("lastPrice"):
+            return SpotMarketRow("mexc", False, symbol=symbol)
+        return SpotMarketRow(
+            "mexc",
+            True,
+            price=_as_float(data.get("lastPrice")),
+            volume_usd=_as_float(data.get("quoteVolume")),
+            symbol=symbol,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("spot mexc %s: %s", base, exc)
+        return SpotMarketRow("mexc", False, symbol=symbol)
+
+
+async def _spot_bingx(http: aiohttp.ClientSession, base: str) -> SpotMarketRow:
+    symbol = f"{base}-USDT"
+    try:
+        async with http.get(
+            "https://open-api.bingx.com/openApi/spot/v1/ticker/24hr",
+            params={"symbol": symbol},
+        ) as resp:
+            body = await resp.json()
+        data = body.get("data")
+        row = data[0] if isinstance(data, list) and data else data if isinstance(data, dict) else None
+        if resp.status != 200 or not row or row.get("lastPrice") in (None, ""):
+            return SpotMarketRow("bingx", False, symbol=symbol)
+        return SpotMarketRow(
+            "bingx",
+            True,
+            price=_as_float(row.get("lastPrice")),
+            volume_usd=_as_float(row.get("quoteVolume")),
+            symbol=symbol,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("spot bingx %s: %s", base, exc)
+        return SpotMarketRow("bingx", False, symbol=symbol)
+
+
+def format_checkall_report(
+    base: str,
+    spot_rows: list[SpotMarketRow],
+    futures_rows: list[ExchangeOiRow],
+) -> str:
+    lines = [f"Токен: {base}", "", "Спотовый рынок", f"{'Биржа':<12} {'Цена':<12} {'Объём 24ч'}"]
+    spot_found = [row for row in spot_rows if row.available]
+    if not spot_found:
+        lines.append("USDT-спот не найден")
+    else:
+        for row in sorted(spot_found, key=lambda item: item.volume_usd or 0.0, reverse=True):
+            lines.append(
+                f"{exchange_label(row.exchange):<12} "
+                f"{format_price(row.price):<12} "
+                f"{format_oi(row.volume_usd)}"
+            )
+    missing_spot = [exchange_label(row.exchange) for row in spot_rows if not row.available]
+    if missing_spot:
+        lines.append("нет спота: " + ", ".join(missing_spot))
+
+    lines.extend(["", "Фьючерсный рынок", f"{'Биржа':<12} {'Цена':<12} {'OI':<12} {'F'}"])
+    futures_found = [row for row in futures_rows if row.available]
+    if not futures_found:
+        lines.append("USDT-фьючерс не найден")
+    else:
+        for row in sorted(futures_found, key=lambda item: item.oi_usd or 0.0, reverse=True):
+            lines.append(
+                f"{exchange_label(row.exchange):<12} "
+                f"{format_price(row.price):<12} "
+                f"{format_oi(row.oi_usd):<12} "
+                f"{format_funding(row.funding_rate, row.exchange)}"
+            )
+    missing_fut = [exchange_label(row.exchange) for row in futures_rows if not row.available]
+    if missing_fut:
+        lines.append("нет фьючерса: " + ", ".join(missing_fut))
+    return "\n".join(lines)
+
+
 def format_check_report(base: str, rows: list[ExchangeOiRow]) -> str:
     available = [r for r in rows if r.available]
     lines = [f"Токен: {base}", ""]
@@ -190,14 +408,15 @@ def format_check_report(base: str, rows: list[ExchangeOiRow]) -> str:
         lines.append("На наблюдаемых биржах контракт не найден.")
         return "\n".join(lines)
 
-    lines.append(f"{'Exch':<12} {'Price':<12} {'OI':<12} {'Long/Short'}")
-    lines.append("-" * 52)
-    for r in available:
+    lines.append(f"{'Exch':<12} {'Price':<12} {'OI':<12} {'Long/Short':<12} {'F'}")
+    lines.append("-" * 60)
+    for r in sorted(available, key=lambda row: row.oi_usd or 0.0, reverse=True):
         lines.append(
             f"{r.exchange.capitalize():<12} "
             f"{format_price(r.price):<12} "
             f"{format_oi(r.oi_usd):<12} "
-            f"{format_ls(r.long_pct, r.short_pct)}"
+            f"{format_ls(r.long_pct, r.short_pct):<12} "
+            f"{format_funding(r.funding_rate, r.exchange)}"
         )
     return "\n".join(lines)
 
@@ -232,7 +451,7 @@ def format_added_at_utc7(dt: datetime | None) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     local = dt.astimezone(TZ_UTC7)
-    return local.strftime("%d.%m.%Y %H:%M UTC+7")
+    return local.strftime("%d.%m.%Y %H:%M")
 
 
 def format_list_report(

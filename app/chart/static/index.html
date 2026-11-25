@@ -8,24 +8,51 @@
   <style>
     :root { color-scheme: dark; }
     body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: #111; color: #ddd; }
+    html, body { height: 100%; }
+    body { display: flex; flex-direction: column; height: 100vh; }
     header { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 12px; }
-    select, button { background: #1c1c1c; color: #ddd; border: 1px solid #333; border-radius: 4px; padding: 4px 8px; }
+    input, button { background: #1c1c1c; color: #ddd; border: 1px solid #333; border-radius: 4px; padding: 4px 8px; }
+    #coin-search { width: 140px; }
+    #coin-menu { position: absolute; z-index: 2; background: #1c1c1c; border: 1px solid #333; max-height: 240px; overflow: auto; min-width: 140px; }
+    #coin-menu button { display: block; width: 100%; text-align: left; border: 0; border-radius: 0; }
     button.active { background: #2a4a6a; border-color: #3d6f99; }
-    #chart { height: 68vh; }
+    .workspace { display: flex; flex: 1; min-height: 0; }
+    #tools-bar {
+      width: 48px; flex: none; display: flex; flex-direction: column; gap: 2px;
+      padding: 6px 4px; background: #161616; border-right: 1px solid #2a2a2a; overflow: auto;
+    }
+    #tools-bar button {
+      width: 40px; height: 40px; padding: 0; display: grid; place-items: center; position: relative;
+    }
+    #tools-bar button svg { width: 22px; height: 22px; stroke: #d7d7d7; fill: none; stroke-width: 1.6; }
+    #tools-bar button.active svg { stroke: #9ec5e8; }
+    #tools-bar button:hover::after {
+      content: attr(data-title);
+      position: absolute; left: 44px; top: 8px; white-space: nowrap;
+      background: #222; color: #eee; border: 1px solid #444; border-radius: 4px;
+      padding: 3px 8px; z-index: 3; font-size: 12px;
+    }
+    #tools-bar .sep { height: 1px; margin: 4px 6px; background: #333; }
+    #chart { flex: 1; min-width: 0; }
     #message { white-space: pre-wrap; margin: 0; padding: 12px; min-height: 4.5em; color: #ccc; }
     .hint { color: #888; font-size: 12px; padding: 0 12px 8px; }
   </style>
 </head>
 <body>
   <header>
-    <select id="coin"></select>
+    <div style="position: relative">
+      <input id="coin-search" type="text" placeholder="Поиск пары" autocomplete="off" />
+      <div id="coin-menu" hidden></div>
+    </div>
     <span id="tfs"></span>
     <span id="exs"></span>
-    <span id="tools"></span>
     <button id="save" type="button">Сохранить рисунки</button>
     <button id="png" type="button">Скачать PNG</button>
   </header>
-  <div id="chart"></div>
+  <div class="workspace">
+    <aside id="tools-bar"></aside>
+    <div id="chart"></div>
+  </div>
   <p class="hint" id="hint">Маркет-дельта — линия за каждую свечу. Ноль — пунктир. Точка — сигнал, цвет это код S1–S7.</p>
   <pre id="message">Выберите монету. Нажатие на точку покажет текст сигнала.</pre>
   <script>
@@ -37,13 +64,39 @@
       S1: "#2E79B5", S2: "#1F8A65", S3: "#C0A030", S4: "#C06028",
       S5: "#C04848", S6: "#7B64B8", S7: "#70B0D8"
     };
+    const svg = (body) => `<svg viewBox="0 0 24 24">${body}</svg>`;
     const TOOLS = [
-      ["Курсор", ""],
-      ["Уровень", "horizontalStraightLine"],
-      ["Отрезок", "segment"],
-      ["Прямоугольник", "rect"]
+      { name: "", title: "Курсор", icon: svg('<path d="M5 3l5 16 2-6 6-2z"/>') },
+      { name: "segment", title: "Отрезок", icon: svg('<path d="M5 19 L19 5"/><circle cx="5" cy="19" r="1.6" fill="#d7d7d7"/><circle cx="19" cy="5" r="1.6" fill="#d7d7d7"/>') },
+      { name: "rayLine", title: "Луч", icon: svg('<path d="M5 19 L19 5"/><path d="M19 5 l-5 1 M19 5 l-1 5"/>') },
+      { name: "straightLine", title: "Прямая", icon: svg('<path d="M4 20 L20 4"/>') },
+      { sep: true },
+      { name: "horizontalStraightLine", title: "Горизонтальный уровень", icon: svg('<path d="M3 12 H21"/>') },
+      { name: "horizontalRayLine", title: "Горизонтальный луч", icon: svg('<path d="M4 12 H20"/><path d="M20 12 l-4 -3 M20 12 l-4 3"/>') },
+      { name: "horizontalSegment", title: "Горизонтальный отрезок", icon: svg('<path d="M6 12 H18"/><circle cx="6" cy="12" r="1.5" fill="#d7d7d7"/><circle cx="18" cy="12" r="1.5" fill="#d7d7d7"/>') },
+      { name: "verticalStraightLine", title: "Вертикальная линия", icon: svg('<path d="M12 3 V21"/>') },
+      { name: "verticalRayLine", title: "Вертикальный луч", icon: svg('<path d="M12 20 V4"/><path d="M12 4 l-3 4 M12 4 l3 4"/>') },
+      { name: "verticalSegment", title: "Вертикальный отрезок", icon: svg('<path d="M12 6 V18"/><circle cx="12" cy="6" r="1.5" fill="#d7d7d7"/><circle cx="12" cy="18" r="1.5" fill="#d7d7d7"/>') },
+      { sep: true },
+      { name: "parallelStraightLine", title: "Параллельные прямые", icon: svg('<path d="M5 16 L19 8"/><path d="M5 20 L19 12"/>') },
+      { name: "priceChannelLine", title: "Ценовой канал", icon: svg('<path d="M4 16 L16 6"/><path d="M8 18 L20 8"/>') },
+      { name: "fibonacciLine", title: "Фибоначчи", icon: svg('<path d="M4 6 H20 M4 10 H20 M4 14 H20 M4 18 H20"/>') },
+      { name: "priceLine", title: "Линия цены", icon: svg('<path d="M4 14 H14"/><rect x="14" y="10" width="7" height="8" rx="1"/>') },
+      { name: "rect", title: "Прямоугольник", icon: svg('<rect x="5" y="6" width="14" height="12"/>') },
+      { sep: true },
+      { name: "simpleAnnotation", title: "Подпись", icon: svg('<path d="M6 16 V8 H16 L18 10 V16 Z"/><path d="M8 11 H14 M8 14 H12"/>') },
+      { name: "simpleTag", title: "Метка", icon: svg('<path d="M5 12 L12 5 H19 V12 L12 19 Z"/>') }
     ];
-    const state = { tf: "15m", ex: Object.fromEntries(EXS.map((e) => [e, true])), tool: "", payload: null, drawings: [] };
+    const state = {
+      tf: "15m",
+      loadedTf: "15m",
+      coin: "",
+      coins: [],
+      ex: Object.fromEntries(EXS.map((e) => [e, true])),
+      tool: "",
+      payload: null,
+      drawings: []
+    };
 
     function headers() {
       const h = { "Content-Type": "application/json" };
@@ -78,7 +131,32 @@
           { color: "#9a9a9a", size: 1, style: "dashed", dashedValue: [4, 3] }
         ]
       },
-      calc: (dataList) => dataList.map((bar) => ({ md: bar.delta == null ? null : bar.delta, zero: 0 }))
+      calc: (dataList) => {
+        const has = dataList.some((bar) => bar.delta != null);
+        return dataList.map((bar) => ({ md: has ? bar.delta : null, zero: has && bar.delta != null ? 0 : null }));
+      }
+    });
+
+    klinecharts.registerOverlay({
+      name: "rect",
+      totalStep: 3,
+      needDefaultPointFigure: true,
+      needDefaultXAxisFigure: true,
+      needDefaultYAxisFigure: true,
+      createPointFigures: ({ coordinates }) => {
+        if (coordinates.length < 2) return [];
+        const [a, b] = coordinates;
+        return [{
+          type: "rect",
+          attrs: {
+            x: Math.min(a.x, b.x),
+            y: Math.min(a.y, b.y),
+            width: Math.abs(b.x - a.x),
+            height: Math.abs(b.y - a.y)
+          },
+          styles: { style: "stroke_fill", color: "rgba(46,121,181,0.12)", borderColor: "#2E79B5", borderSize: 1 }
+        }];
+      }
     });
 
     klinecharts.registerOverlay({
@@ -99,6 +177,7 @@
 
     const chart = klinecharts.init("chart", { styles: { grid: { horizontal: { color: "#222" }, vertical: { color: "#222" } } } });
     chart.createIndicator("MD", false, { id: "md", height: 140 });
+    window.addEventListener("resize", () => chart.resize());
 
     function showSignalText(event) {
       const extra = event?.overlay?.extendData;
@@ -122,7 +201,9 @@
     function placeSignals() {
       chart.removeOverlay({ groupId: "signals" });
       const signals = (state.payload && state.payload.signals) || [];
+      const signalWindow = state.loadedTf === "1d" ? "24h" : state.loadedTf;
       for (const signal of signals) {
+        if ((signal.window || "") !== signalWindow) continue;
         if (!state.ex[String(signal.exchange || "").toLowerCase()]) continue;
         const price = Number(signal.price);
         if (!price) continue;
@@ -157,20 +238,29 @@
     function redraw() {
       if (!state.payload) return;
       const keep = state.drawings.map((row) => ({ name: row.name, points: row.points }));
-      chart.applyNewData(sumDelta(state.payload.candles, state.payload.delta));
+      const bars = sumDelta(state.payload.candles, state.payload.delta);
+      const last = bars.length ? bars[bars.length - 1].close : 1;
+      const precision = last >= 100 ? 2 : last >= 1 ? 4 : 6;
+      chart.setPriceVolumePrecision(precision, 2);
+      chart.applyNewData(bars);
+      chart.scrollToRealTime();
       placeSignals();
       if (keep.length) placeDrawings(keep);
     }
 
     async function loadChart() {
-      const coin = document.getElementById("coin").value;
+      const coin = state.coin;
       if (!coin) return;
-      const response = await fetch(`/api/chart?coin=${encodeURIComponent(coin)}&tf=${state.tf}&hours=72`, { headers: headers() });
+      const requested = state.tf;
+      const response = await fetch(`/api/chart?coin=${encodeURIComponent(coin)}&tf=${requested}&hours=72`, { headers: headers() });
       const body = await response.json();
       if (!response.ok) {
+        state.tf = state.loadedTf;
+        paintTfs();
         document.getElementById("message").textContent = body.error || "Ошибка загрузки";
         return;
       }
+      state.loadedTf = requested;
       state.payload = body;
       redraw();
       const drawings = await fetch(`/api/drawings?coin=${encodeURIComponent(coin)}&tf=${state.tf}`, { headers: headers() });
@@ -180,25 +270,34 @@
         `Свечи ${body.source}. Линия — маркет-дельта выбранных бирж за свечу, пунктир — ноль. Точек: ${(body.signals || []).length}.`;
     }
 
+    let pendingId = null;
+
     function armTool(name) {
+      if (pendingId) {
+        chart.removeOverlay(pendingId);
+        pendingId = null;
+      }
       state.tool = name;
+      paintTools();
       if (!name) return;
-      chart.createOverlay({
+      pendingId = chart.createOverlay({
         name,
         groupId: "user",
+        mode: "weak_magnet",
         onDrawEnd: (event) => {
           const overlay = event.overlay;
+          pendingId = null;
           state.drawings.push({
             id: overlay.id,
             name: overlay.name,
             points: (overlay.points || []).map((point) => ({ timestamp: point.timestamp, value: point.value }))
           });
-          state.tool = "";
-          paintTools();
+          if (state.tool === name) armTool(name);
           return false;
         },
         onRemoved: (event) => {
           state.drawings = state.drawings.filter((row) => row.id !== event.overlay.id);
+          if (event.overlay.id === pendingId) pendingId = null;
           return false;
         }
       });
@@ -230,17 +329,67 @@
     }
 
     function paintTools() {
-      buttonRow(document.getElementById("tools"), TOOLS, state.tool, (value) => {
-        state.tool = value;
-        paintTools();
-        armTool(value);
+      const parent = document.getElementById("tools-bar");
+      parent.innerHTML = "";
+      TOOLS.forEach((tool) => {
+        if (tool.sep) {
+          const sep = document.createElement("div");
+          sep.className = "sep";
+          parent.appendChild(sep);
+          return;
+        }
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.innerHTML = tool.icon;
+        btn.dataset.title = tool.title;
+        btn.className = tool.name === state.tool ? "active" : "";
+        btn.onclick = () => armTool(tool.name);
+        parent.appendChild(btn);
       });
     }
 
+    function paintCoinMenu() {
+      const menu = document.getElementById("coin-menu");
+      const query = document.getElementById("coin-search").value.trim().toUpperCase();
+      const matches = state.coins.filter((coin) => coin.includes(query)).slice(0, 30);
+      menu.innerHTML = "";
+      matches.forEach((coin) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = coin;
+        btn.onclick = () => {
+          state.coin = coin;
+          document.getElementById("coin-search").value = coin;
+          menu.hidden = true;
+          loadChart();
+        };
+        menu.appendChild(btn);
+      });
+      menu.hidden = matches.length === 0;
+    }
+
+    const search = document.getElementById("coin-search");
+    search.oninput = () => paintCoinMenu();
+    search.onfocus = () => paintCoinMenu();
+    search.onkeydown = (event) => {
+      if (event.key !== "Enter") return;
+      const query = search.value.trim().toUpperCase();
+      const exact = state.coins.find((coin) => coin === query);
+      if (!exact) return;
+      state.coin = exact;
+      document.getElementById("coin-menu").hidden = true;
+      loadChart();
+    };
+    document.addEventListener("click", (event) => {
+      if (!event.target.closest("#coin-search") && !event.target.closest("#coin-menu")) {
+        document.getElementById("coin-menu").hidden = true;
+      }
+    });
+
     document.getElementById("save").onclick = async () => {
-      const coin = document.getElementById("coin").value;
+      const coin = state.coin;
       const items = state.drawings.map((row) => ({ name: row.name, points: row.points }));
-      const response = await fetch(`/api/drawings?coin=${encodeURIComponent(coin)}&tf=${state.tf}`, {
+      const response = await fetch(`/api/drawings?coin=${encodeURIComponent(coin)}&tf=${state.loadedTf}`, {
         method: "PUT",
         headers: headers(),
         body: JSON.stringify({ items })
@@ -254,7 +403,7 @@
       const url = chart.getConvertPictureUrl(true, "png", "#111111");
       const link = document.createElement("a");
       link.href = url;
-      link.download = `${document.getElementById("coin").value}-${state.tf}.png`;
+      link.download = `${state.coin}-${state.loadedTf}.png`;
       link.click();
     };
 
@@ -263,15 +412,12 @@
     paintTools();
 
     fetch("/api/coins", { headers: headers() }).then((response) => response.json()).then((body) => {
-      const select = document.getElementById("coin");
-      for (const coin of body.coins || []) {
-        const option = document.createElement("option");
-        option.value = coin;
-        option.textContent = coin;
-        select.appendChild(option);
+      state.coins = body.coins || [];
+      if (state.coins.length) {
+        state.coin = state.coins[0];
+        search.value = state.coin;
+        loadChart();
       }
-      select.onchange = () => loadChart();
-      if (select.value) loadChart();
     }).catch(() => {
       document.getElementById("message").textContent = "Не удалось получить список монет. Проверьте CHART_TOKEN в адресе: /?token=...";
     });

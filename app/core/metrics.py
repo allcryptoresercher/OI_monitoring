@@ -75,6 +75,18 @@ def percentile_rank(value: float, history: list[float]) -> float | None:
     return 100.0 * below / len(history)
 
 
+def window_history_ok(now: datetime, before: datetime | None, window_sec: int) -> bool:
+    """Окно можно сравнивать, только если точка «до» лежит у его начала.
+
+    Слишком короткий ряд (бот только запущен) и слишком длинный разрыв
+    (простой в несколько часов) не считаются этим таймфреймом.
+    """
+    if before is None or window_sec <= 0:
+        return False
+    age = (now - before).total_seconds()
+    return window_sec * 0.85 <= age <= window_sec * 1.5
+
+
 def funding_to_8h(funding_rate: float | None, exchange: str) -> float | None:
     """Normalize funding to 8h period. Most perps quote per 8h already; HL may differ."""
     if funding_rate is None:
